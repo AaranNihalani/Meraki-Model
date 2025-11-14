@@ -1,162 +1,140 @@
 import os
-import torch
 import json
 import numpy as np
+import torch
 from datasets import Dataset
+from sklearn.metrics import f1_score
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer,
-    TrainerCallback
 )
-from sklearn.metrics import f1_score
 
 # =========================================================
-# 0. Disable MPS/GPU on macOS — force CPU only
+# 1. FORCE CPU (disable MPS completely)
 # =========================================================
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 torch.backends.mps.is_available = lambda: False
 torch.backends.mps.is_built = lambda: False
-
-print("🔥 MPS available?", torch.backends.mps.is_available())
 
 DEVICE = torch.device("cpu")
 print("🔥 Training on:", DEVICE)
 
-BASE_MODEL = "microsoft/deberta-base"
-os.makedirs("./models", exist_ok=True)
 
 # =========================================================
-# 1. Load Dataset
+# 2. Load Data
 # =========================================================
-print("\n📘 Loading labeled JSON dataset...")
 records = json.load(open("./data/labeled/tagged_sentences.json"))
 
-# Build tag→id mappings
-all_tags = sorted({t for r in records for t in r["tags"]})
-tag2id = {t: i for i, t in enumerate(all_tags)}
+tags = sorted({t for r in records for t in r["tags"]})
+tag2id = {t: i for i, t in enumerate(tags)}
 id2tag = {i: t for t, i in tag2id.items()}
+
 json.dump(id2tag, open("./models/id2tag.json", "w"), indent=2)
 
-# Convert tag list → binary vector label
-def encode_labels(tags):
-    vec = np.zeros(len(tag2id))
-    for t in tags:
+def encode_labels(tag_list):
+    vec = np.zeros(len(tag2id), dtype=np.float32)
+    for t in tag_list:
         if t in tag2id:
-            vec[tag2id[t]] = 1
-    return vec.tolist()
+            vec[tag2id[t]] = 1.0
+    return vec
 
-texts = [{"text": r["sentence"], "labels": encode_labels(r["tags"]) } for r in records]
-dataset = Dataset.from_list(texts)
+dataset_list = [{
+    "text": r["sentence"],
+    "labels": encode_labels(r["tags"]).tolist()
+} for r in records]
+
+dataset = Dataset.from_list(dataset_list)
 dataset = dataset.train_test_split(test_size=0.1, seed=42)
 
-print(f"Training samples: {len(dataset['train'])}, Validation: {len(dataset['test'])}")
 
 # =========================================================
-# 2. Tokenizer
+# 3. Tokenizer
 # =========================================================
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-base")
 
-def tokenize(examples):
-    enc = tokenizer(
-        examples["text"],
-        truncation=True,
-        padding="max_length",
-        max_length=128
-    )
-    # IMPORTANT: keep labels!!
-    enc["labels"] = examples["labels"]
+def tokenize(batch):
+    enc = tokenizer(batch["text"], max_length=128, truncation=True, padding="max_length")
+    enc["labels"] = [np.array(lbl, dtype=np.float32) for lbl in batch["labels"]]
     return enc
 
-# remove __index_level_0__ silently carried by pandas
-cols_to_remove = [c for c in dataset["train"].column_names if c not in ("labels", "text")]
-tokenized_ds = dataset.map(tokenize, batched=True, remove_columns=cols_to_remove)
-tokenized_ds.set_format("torch")
+tokenized = dataset.map(tokenize, batched=True)
+tokenized.set_format(
+    type="torch",
+    columns=["input_ids", "attention_mask", "labels"]
+)
 
-val_labels = np.array([x["labels"] for x in tokenized_ds["test"]])
-print("Validation label sums:", val_labels.sum(axis=0))
-print("Total positives in validation:", val_labels.sum())
-
-
-print("\n🔍 Sample tokenized item:", tokenized_ds["train"][0])
 
 # =========================================================
-# 3. Model
+# 4. Compute class weights for BCEWithLogits
+# =========================================================
+all_lbls = np.array([x["labels"] for x in dataset["train"]])
+pos_freq = all_lbls.sum(axis=0)
+pos_weight = (1.0 / (pos_freq + 1)).astype(np.float32)  # avoid div-by-zero
+
+
+# =========================================================
+# 5. Load Model
 # =========================================================
 model = AutoModelForSequenceClassification.from_pretrained(
-    BASE_MODEL,
+    "microsoft/deberta-base",
     num_labels=len(tag2id),
     problem_type="multi_label_classification"
-).to(DEVICE)
+)
+
+# Add class weights so rare labels get learned
+model.config.pos_weight = torch.tensor(pos_weight, dtype=torch.float32)
+
+model.to(DEVICE)
+
 
 # =========================================================
-# 4. Optional Callback for Gradient Checking
+# 6. Metrics
 # =========================================================
-class GradCheckCallback(TrainerCallback):
-    def on_step_end(self, args, state, control, **kwargs):
-        for name, param in kwargs["model"].named_parameters():
-            if param.grad is not None:
-                print("🟢 Grad norm:", param.grad.data.norm().item())
-                break
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    probs = 1 / (1 + np.exp(-logits))
+    preds = (probs > 0.35).astype(int)
+    return {
+        "f1_micro": f1_score(labels, preds, average="micro", zero_division=0),
+        "f1_macro": f1_score(labels, preds, average="macro", zero_division=0),
+    }
+
 
 # =========================================================
-# 5. Training Arguments
+# 7. TrainingArguments (CORRECTED)
 # =========================================================
 args = TrainingArguments(
     output_dir="./models/meraki_sentence_tagger",
     learning_rate=3e-5,
     per_device_train_batch_size=2,
+    num_train_epochs=5,
     gradient_accumulation_steps=1,
-    num_train_epochs=10,
-    fp16=False,
-    bf16=False,
-    save_strategy="epoch",
-    eval_strategy="epoch",
-    logging_strategy="steps",
-    logging_steps=10,
-    load_best_model_at_end=True,
-    metric_for_best_model="f1",
+    evaluation_strategy="epoch",       # <── CORRECT
+    save_strategy="epoch",             # <── CORRECT
+    metric_for_best_model="f1_micro",
+    load_best_model_at_end=True,       # <── now works
+    greater_is_better=True,
+    logging_steps=50,
+    save_total_limit=2,
     report_to="none",
     dataloader_pin_memory=False,
-    logging_dir="./logs/sft",
-    dataloader_num_workers=0,
 )
-
-# =========================================================
-# 6. Metrics (correct multi-label F1)
-# =========================================================
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    probs = 1 / (1 + np.exp(-logits))
-    preds = (probs > 0.5).astype(int)
-    return {
-        "f1": f1_score(labels, preds, average="micro", zero_division=0),
-        "macro_f1": f1_score(labels, preds, average="macro", zero_division=0),
-    }
-
-# =========================================================
-# 7. Trainer
-# =========================================================
-print("\n🚀 Starting supervised fine-tuning (multi-label)...")
 
 trainer = Trainer(
     model=model,
     args=args,
-    train_dataset=tokenized_ds["train"],
-    eval_dataset=tokenized_ds["test"],
+    train_dataset=tokenized["train"],
+    eval_dataset=tokenized["test"],
     tokenizer=tokenizer,
     compute_metrics=compute_metrics,
-    callbacks=[GradCheckCallback()],
 )
 
+print("🚀 Training started…")
 trainer.train()
 
-# =========================================================
-# 8. Save model
-# =========================================================
 trainer.save_model("./models/meraki_sentence_tagger")
 tokenizer.save_pretrained("./models/meraki_sentence_tagger")
 
-print("✅ Fine-tuning complete!")
+print("✅ Training complete!")
