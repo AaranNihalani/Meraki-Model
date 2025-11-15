@@ -22,9 +22,8 @@ nltk.download("punkt", quiet=True)
 # Paths
 # ---------------------------------------------------------
 MODEL_DIR = "./models/meraki_sentence_tagger"
-MLB_PATH = os.path.join(MODEL_DIR, "mlb.pkl")
 ID2LABEL_PATH = os.path.join(MODEL_DIR, "id2label.json")
-CANONICAL_PATH = "./canonical_mapping.json"   # MUST exist
+MLB_PATH = os.path.join(MODEL_DIR, "mlb.pkl")
 
 print("🔥 Using device:", DEVICE)
 print("🔥 Loading best checkpoint:", MODEL_DIR)
@@ -35,11 +34,8 @@ print("🔥 Loading best checkpoint:", MODEL_DIR)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR).to(DEVICE)
 
-# Load label mapping
+# Load id2label mapping
 id2label = json.load(open(ID2LABEL_PATH))
-
-# Canonical dictionary
-CANONICAL = json.load(open(CANONICAL_PATH))
 
 # Load binarizer
 import pickle
@@ -50,64 +46,62 @@ with open(MLB_PATH, "rb") as f:
 # ---------------------------------------------------------
 # Prediction
 # ---------------------------------------------------------
-def predict(sentence, threshold=0.20):
+def predict(sentence, threshold=0.20, top_k=5):
     inputs = tokenizer(sentence, return_tensors="pt", truncation=True, padding=True).to(DEVICE)
 
     with torch.no_grad():
-        probs = torch.sigmoid(model(**inputs).logits)[0].cpu().numpy()
+        logits = model(**inputs).logits
+        probs = torch.sigmoid(logits)[0].cpu().numpy()
 
-    indices = np.where(probs >= threshold)[0]
+    # top-k sorted
+    top_indices = probs.argsort()[::-1][:top_k]
 
-    if len(indices) == 0:
-        return []
+    results = []
+    for idx in top_indices:
+        score = float(probs[idx])
+        if score >= threshold:
+            results.append((id2label[str(idx)], score))
 
-    labels = [id2label[str(i)] for i in indices]
-    return labels
-
-
-# ---------------------------------------------------------
-# Normalize → canonical
-# ---------------------------------------------------------
-def canonicalize(label_list):
-    if len(label_list) == 0:
-        return ""
-
-    key = ", ".join(label_list)
-
-    if key in CANONICAL:
-        return CANONICAL[key]
-
-    return "UNKNOWN"
+    return results
 
 
 # ---------------------------------------------------------
-# Clean & split sentences
+# Clean & split
 # ---------------------------------------------------------
 def normalize_paragraph(text):
-    cleaned = " ".join([l.strip() for l in text.split("\n") if l.strip() != ""])
-    return cleaned
+    merged = " ".join([l.strip() for l in text.split("\n") if l.strip() != ""])
+    return merged
 
-def split_sentences(paragraph):
-    return nltk.sent_tokenize(paragraph)
+def split_sentences(text):
+    return nltk.sent_tokenize(text)
 
 
 # ---------------------------------------------------------
 # Tag whole paragraph
 # ---------------------------------------------------------
-def tag_paragraph(paragraph, threshold=0.20):
-    paragraph = normalize_paragraph(paragraph)
-    sentences = split_sentences(paragraph)
+def tag_paragraph(paragraph, threshold=0.20, top_k=5):
+    text = normalize_paragraph(paragraph)
+    sentences = split_sentences(text)
 
     rows = []
 
-    for sent in sentences:
-        raw_labels = predict(sent, threshold)
-        canonical = canonicalize(raw_labels)
-        rows.append([sent, canonical])
+    print("\n=============== PREDICTIONS ================\n")
 
-        print(f"\nSENTENCE: {sent}")
-        print("RAW LABELS:", raw_labels)
-        print("CANONICAL:", canonical)
+    for sent in sentences:
+        tags = predict(sent, threshold, top_k)
+
+        print(f"• {sent}")
+        if not tags:
+            print("   → (no tags)\n")
+            rows.append([sent, ""])
+            continue
+
+        for label, score in tags:
+            print(f"   → {label} ({score:.3f})")
+        print()
+
+        tag_str = ", ".join([f"{label} ({score:.3f})" for label, score in tags])
+        rows.append([sent, tag_str])
 
     return rows
 
@@ -115,10 +109,10 @@ def tag_paragraph(paragraph, threshold=0.20):
 # ---------------------------------------------------------
 # Save XLSX
 # ---------------------------------------------------------
-def save_to_excel(rows, out="tagged_sentences.xlsx"):
-    df = pd.DataFrame(rows, columns=["Sentence", "Canonical Tag"])
-    df.to_excel(out, index=False)
-    print(f"\n📄 Saved to {out}")
+def save_to_excel(rows, out_path="tagged_sentences.xlsx"):
+    df = pd.DataFrame(rows, columns=["Sentence", "Predicted Tags"])
+    df.to_excel(out_path, index=False)
+    print(f"\n📄 Saved results to: {out_path}")
 
 
 # ---------------------------------------------------------
@@ -135,6 +129,8 @@ International to get medical support. I don’t get non-food support because of 
 advocates to get SIM card I hope upcoming month I will support the noon-food item. I am grateful
 to NRC for their unequivocal support now I live in camp -25 with happily.
 """
+
+
 # ---------------------------------------------------------
 # Run
 # ---------------------------------------------------------
