@@ -11,9 +11,11 @@ from transformers import (
 )
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split
+import pickle
 
 DATA_FILE = "./data/labeled/tagged_sentences.json"
-MODEL_NAME = "./models/domain_adapted"   # your domain-adapted base
+MODEL_NAME = "./models/domain_adapted"
 OUTPUT_DIR = "./models/meraki_sentence_tagger"
 
 # --------------------------
@@ -23,10 +25,19 @@ with open(DATA_FILE, "r") as f:
     data = json.load(f)
 
 sentences = [x["sentence"] for x in data]
-tag_lists = [x["tags"] for x in data]
+
+# Ensure all tags are lists
+tag_lists = []
+for x in data:
+    if isinstance(x["tags"], str):
+        tag_lists.append([x["tags"]])
+    else:
+        tag_lists.append(x["tags"])
+
+print(f"Loaded {len(sentences)} sentences.")
 
 # ---------------------------------
-# Fit MultiLabelBinarizer
+# MultiLabelBinarizer
 # ---------------------------------
 mlb = MultiLabelBinarizer()
 label_matrix = mlb.fit_transform(tag_lists)
@@ -39,6 +50,10 @@ print(f"🔎 Example classes: {mlb.classes_[:10]}")
 # Tokenizer & Model
 # --------------------------
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+# Mistral models need a padding token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL_NAME,
@@ -71,7 +86,6 @@ class MerakiDataset(Dataset):
 # --------------------------
 # Train/test split
 # --------------------------
-from sklearn.model_selection import train_test_split
 train_s, val_s, train_l, val_l = train_test_split(
     sentences, label_matrix, test_size=0.1, random_state=42
 )
@@ -80,17 +94,17 @@ train_dataset = MerakiDataset(train_s, train_l)
 val_dataset = MerakiDataset(val_s, val_l)
 
 # --------------------------
-# Evaluation Metrics
+# Evaluation
 # --------------------------
 def compute_metrics(pred):
     logits, labels = pred
-    preds = (1 / (1 + np.exp(-logits))) > 0.5  # sigmoid threshold
+    probs = 1 / (1 + np.exp(-logits))
+    preds = probs > 0.5
+
     micro = f1_score(labels, preds, average="micro", zero_division=0)
     macro = f1_score(labels, preds, average="macro", zero_division=0)
-    return {
-        "f1_micro": micro,
-        "f1_macro": macro
-    }
+
+    return {"f1_micro": micro, "f1_macro": macro}
 
 # --------------------------
 # Training Arguments
@@ -106,6 +120,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="f1_micro",
     greater_is_better=True,
+    logging_steps=20,
 )
 
 # --------------------------
@@ -121,11 +136,20 @@ trainer = Trainer(
 
 print("🚀 Starting fine-tuning...")
 trainer.train()
-trainer.save_model(OUTPUT_DIR)
 
-# Save ML-Binarizer for inference
-import pickle
+# --------------------------
+# Save model
+# --------------------------
+trainer.save_model(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
+
+# Save ML-Binarizer
 with open(os.path.join(OUTPUT_DIR, "mlb.pkl"), "wb") as f:
     pickle.dump(mlb, f)
+
+# Save id2label.json for infer.py
+id2label = {i: label for i, label in enumerate(mlb.classes_)}
+with open(os.path.join(OUTPUT_DIR, "id2label.json"), "w") as f:
+    json.dump(id2label, f, indent=2)
 
 print("🎉 Training complete! Model saved.")
