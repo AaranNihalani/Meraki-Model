@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModel
 
 DEVICE = torch.device("cpu")
 BASE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-os.environ('TOKENIZERS_PARALLELISM') = False
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 def load_unclustered(path="./data/labeled/unclustered_tagged_sentences.json"):
     if not os.path.exists(path):
         raise FileNotFoundError("Missing unclustered JSON. Run convert_unclustered.py first.")

@@ -4,75 +4,66 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datasets import Dataset
-from sklearn.metrics import f1_score
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     TrainingArguments,
-    Trainer,
-    DataCollatorWithPadding,
+    Trainer
 )
+from sklearn.metrics import f1_score
 
 # ============================================================
-# 0. FORCE CPU (disable MPS)
+# 0. DEVICE CONFIG
 # ============================================================
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 torch.backends.mps.is_available = lambda: False
 torch.backends.mps.is_built = lambda: False
 DEVICE = torch.device("cpu")
-print("🔥 Training on:", DEVICE)
+print("🔥 Using device:", DEVICE)
+
 
 # ============================================================
-# 1. LOAD DATA
+# 1. LOAD DATASET
 # ============================================================
 records = json.load(open("./data/labeled/tagged_sentences.json"))
 
-# All tags
 tags = sorted({t for r in records for t in r["tags"]})
 tag2id = {t: i for i, t in enumerate(tags)}
 id2tag = {i: t for t, i in tag2id.items()}
 json.dump(id2tag, open("./models/id2tag.json", "w"), indent=2)
 
-def encode_tags(tag_list):
+print(f"\n🔎 NUM LABELS = {len(tag2id)}")
+print("🔎 Example tags:", tags[:5])
+
+def encode(lbls):
     v = np.zeros(len(tag2id), dtype=np.float32)
-    for t in tag_list:
-        v[tag2id[t]] = 1
+    for t in lbls:
+        v[tag2id[t]] = 1.0
     return v
 
-# ------------------------------------------------------------
-# 1.1 Instruction-formatted INPUT CONSTRUCTION
-# ------------------------------------------------------------
-# This improves learning by giving the model better context.
-def format_input(sentence):
-    return (
-        "You are an expert humanitarian analyst.\n"
-        "Your task is to assign ALL relevant tags from the label set.\n"
-        "Classify the following sentence:\n\n"
-        f"Sentence: {sentence}\n"
-    )
-
 dataset = Dataset.from_list([
-    {
-        "text": format_input(r["sentence"]),
-        "labels": encode_tags(r["tags"])
-    }
+    {"text": r["sentence"], "labels": encode(r["tags"])}
     for r in records
 ])
 
-dataset = dataset.train_test_split(test_size=0.1, seed=42)
+# Debug print
+print("\n🧪 RAW LABEL CHECK (first 5)")
+for i in range(5):
+    print(dataset[i]["labels"], " sum=", sum(dataset[i]["labels"]))
+
+dataset = dataset.train_test_split(0.1, seed=42)
 
 
 # ============================================================
-# 2. TOKENIZER
+# 2. TOKENIZER (CRITICAL: use BASE tokenizer)
 # ============================================================
-tokenizer = AutoTokenizer.from_pretrained("./models/domain_adapted")
+tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-base")
 
 def tokenize(batch):
     enc = tokenizer(
         batch["text"],
         truncation=True,
-        max_length=256,
-        padding="max_length"
+        padding="max_length",
+        max_length=128
     )
     enc["labels"] = [np.array(lbl, dtype=np.float32) for lbl in batch["labels"]]
     return enc
@@ -82,9 +73,11 @@ tokenized = dataset.map(
     batched=True,
     remove_columns=dataset["train"].column_names
 )
-
 tokenized.set_format("torch")
-collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+print("\n🧪 TOKENIZED LABEL CHECK (first 5)")
+for i in range(5):
+    print(tokenized["train"][i]["labels"].shape, tokenized["train"][i]["labels"].sum())
 
 
 # ============================================================
@@ -92,30 +85,46 @@ collator = DataCollatorWithPadding(tokenizer=tokenizer)
 # ============================================================
 label_matrix = np.array([x["labels"] for x in dataset["train"]])
 pos_freq = label_matrix.sum(axis=0)
-pos_weight = torch.tensor(1 / (pos_freq + 1), dtype=torch.float32)
-loss_fct = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+print("\n📊 POS FREQ:", pos_freq[:10])
+pos_weight = torch.tensor(1.0 / (pos_freq + 1.0), dtype=torch.float32)
+print("📊 POS WEIGHT:", pos_weight[:10])
 
 
 # ============================================================
-# 4. LOAD MODEL
+# 4. LOAD MODEL (DOMAIN ADAPTED)
 # ============================================================
-# START FROM YOUR OWN domain_adapted checkpoint
 model = AutoModelForSequenceClassification.from_pretrained(
     "./models/domain_adapted",
     num_labels=len(tag2id),
     problem_type="multi_label_classification"
 ).to(DEVICE)
 
+loss_fct = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+
 # ============================================================
-# 5. CUSTOM WEIGHTED TRAINER
+# 5. DEBUG CAPABLE TRAINER
 # ============================================================
-class WeightedTrainer(Trainer):
+class DebugTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
+
+        # Debug info every ~50 steps
+        if self.state.global_step % 50 == 0:
+            print("\n🔍 LOSS DEBUG:")
+            print(" - logits mean:", logits.mean().item())
+            print(" - labels sum:", labels.sum().item())
+            print(" - logits std:", logits.std().item())
+
         loss = loss_fct(logits, labels.float())
         return (loss, outputs) if return_outputs else loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        out = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        return out
 
 
 # ============================================================
@@ -124,7 +133,7 @@ class WeightedTrainer(Trainer):
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
     probs = 1 / (1 + np.exp(-logits))
-    preds = (probs > 0.30).astype(int)
+    preds = (probs > 0.35).astype(int)
     return {
         "f1_micro": f1_score(labels, preds, average="micro", zero_division=0),
         "f1_macro": f1_score(labels, preds, average="macro", zero_division=0),
@@ -132,44 +141,42 @@ def compute_metrics(eval_pred):
 
 
 # ============================================================
-# 7. TRAINING ARGS
+# 7. TRAINING SETTINGS
 # ============================================================
-args = TrainingArguments(
+training_args = TrainingArguments(
     output_dir="./models/meraki_sentence_tagger",
     overwrite_output_dir=True,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+    num_train_epochs=8,
+    learning_rate=2e-5,
+    warmup_ratio=0.1,
     evaluation_strategy="epoch",
     save_strategy="epoch",
-    learning_rate=3e-5,
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=2,
-    num_train_epochs=6,
+    logging_steps=25,
     load_best_model_at_end=True,
     metric_for_best_model="f1_micro",
     greater_is_better=True,
-    save_total_limit=2,
-    logging_steps=50,
     report_to="none",
 )
+
 
 # ============================================================
 # 8. TRAIN
 # ============================================================
-trainer = WeightedTrainer(
+trainer = DebugTrainer(
     model=model,
-    args=args,
+    args=training_args,
     train_dataset=tokenized["train"],
     eval_dataset=tokenized["test"],
     tokenizer=tokenizer,
-    data_collator=collator,
     compute_metrics=compute_metrics,
 )
 
-print("\n🚀 Starting training...\n")
+print("\n🚀 START TRAINING\n")
 trainer.train()
 
-# Save final model + tokenizer
 trainer.save_model("./models/meraki_sentence_tagger")
 tokenizer.save_pretrained("./models/meraki_sentence_tagger")
 
-print("\n🎉 Training complete!")
-print("Saved to: ./models/meraki_sentence_tagger\n")
+print("\n🎉 Fine-tuning complete!")
