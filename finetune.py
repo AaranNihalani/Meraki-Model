@@ -1,182 +1,131 @@
-import os
 import json
+import os
 import numpy as np
 import torch
-import torch.nn as nn
-from datasets import Dataset
+from torch.utils.data import Dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer
 )
+from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
 
-# ============================================================
-# 0. DEVICE CONFIG
-# ============================================================
-torch.backends.mps.is_available = lambda: False
-torch.backends.mps.is_built = lambda: False
-DEVICE = torch.device("cpu")
-print("🔥 Using device:", DEVICE)
+DATA_FILE = "./data/labeled/tagged_sentences.json"
+MODEL_NAME = "./models/domain_adapted"   # your domain-adapted base
+OUTPUT_DIR = "./models/meraki_sentence_tagger"
 
+# --------------------------
+# Load dataset
+# --------------------------
+with open(DATA_FILE, "r") as f:
+    data = json.load(f)
 
-# ============================================================
-# 1. LOAD DATASET
-# ============================================================
-records = json.load(open("./data/labeled/tagged_sentences.json"))
+sentences = [x["sentence"] for x in data]
+tag_lists = [x["tags"] for x in data]
 
-tags = sorted({t for r in records for t in r["tags"]})
-tag2id = {t: i for i, t in enumerate(tags)}
-id2tag = {i: t for t, i in tag2id.items()}
-json.dump(id2tag, open("./models/id2tag.json", "w"), indent=2)
+# ---------------------------------
+# Fit MultiLabelBinarizer
+# ---------------------------------
+mlb = MultiLabelBinarizer()
+label_matrix = mlb.fit_transform(tag_lists)
+num_labels = len(mlb.classes_)
 
-print(f"\n🔎 NUM LABELS = {len(tag2id)}")
-print("🔎 Example tags:", tags[:5])
+print(f"🔎 NUM LABELS = {num_labels}")
+print(f"🔎 Example classes: {mlb.classes_[:10]}")
 
-def encode(lbls):
-    v = np.zeros(len(tag2id), dtype=np.float32)
-    for t in lbls:
-        v[tag2id[t]] = 1.0
-    return v
+# --------------------------
+# Tokenizer & Model
+# --------------------------
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-dataset = Dataset.from_list([
-    {"text": r["sentence"], "labels": encode(r["tags"])}
-    for r in records
-])
-
-# Debug print
-print("\n🧪 RAW LABEL CHECK (first 5)")
-for i in range(5):
-    print(dataset[i]["labels"], " sum=", sum(dataset[i]["labels"]))
-
-dataset = dataset.train_test_split(0.1, seed=42)
-
-
-# ============================================================
-# 2. TOKENIZER (CRITICAL: use BASE tokenizer)
-# ============================================================
-tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-base")
-
-def tokenize(batch):
-    enc = tokenizer(
-        batch["text"],
-        truncation=True,
-        padding="max_length",
-        max_length=128
-    )
-    enc["labels"] = [np.array(lbl, dtype=np.float32) for lbl in batch["labels"]]
-    return enc
-
-tokenized = dataset.map(
-    tokenize,
-    batched=True,
-    remove_columns=dataset["train"].column_names
-)
-tokenized.set_format("torch")
-
-print("\n🧪 TOKENIZED LABEL CHECK (first 5)")
-for i in range(5):
-    print(tokenized["train"][i]["labels"].shape, tokenized["train"][i]["labels"].sum())
-
-
-# ============================================================
-# 3. CLASS WEIGHTS
-# ============================================================
-label_matrix = np.array([x["labels"] for x in dataset["train"]])
-pos_freq = label_matrix.sum(axis=0)
-
-print("\n📊 POS FREQ:", pos_freq[:10])
-pos_weight = torch.tensor(1.0 / (pos_freq + 1.0), dtype=torch.float32)
-print("📊 POS WEIGHT:", pos_weight[:10])
-
-
-# ============================================================
-# 4. LOAD MODEL (DOMAIN ADAPTED)
-# ============================================================
 model = AutoModelForSequenceClassification.from_pretrained(
-    "./models/domain_adapted",
-    num_labels=len(tag2id),
+    MODEL_NAME,
+    num_labels=num_labels,
     problem_type="multi_label_classification"
-).to(DEVICE)
+)
 
-loss_fct = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+# --------------------------
+# Dataset class
+# --------------------------
+class MerakiDataset(Dataset):
+    def __init__(self, sentences, labels):
+        self.sentences = sentences
+        self.labels = labels
 
+    def __len__(self):
+        return len(self.sentences)
 
-# ============================================================
-# 5. DEBUG CAPABLE TRAINER
-# ============================================================
-class DebugTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
-        labels = inputs.pop("labels")
-        outputs = model(**inputs)
-        logits = outputs.logits
+    def __getitem__(self, idx):
+        encoding = tokenizer(
+            self.sentences[idx],
+            truncation=True,
+            padding="max_length",
+            max_length=256
+        )
+        encoding = {k: torch.tensor(v) for k, v in encoding.items()}
+        encoding["labels"] = torch.tensor(self.labels[idx]).float()
+        return encoding
 
-        # Debug info every ~50 steps
-        if self.state.global_step % 50 == 0:
-            print("\n🔍 LOSS DEBUG:")
-            print(" - logits mean:", logits.mean().item())
-            print(" - labels sum:", labels.sum().item())
-            print(" - logits std:", logits.std().item())
+# --------------------------
+# Train/test split
+# --------------------------
+from sklearn.model_selection import train_test_split
+train_s, val_s, train_l, val_l = train_test_split(
+    sentences, label_matrix, test_size=0.1, random_state=42
+)
 
-        loss = loss_fct(logits, labels.float())
-        return (loss, outputs) if return_outputs else loss
+train_dataset = MerakiDataset(train_s, train_l)
+val_dataset = MerakiDataset(val_s, val_l)
 
-    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        out = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
-        return out
-
-
-# ============================================================
-# 6. METRICS
-# ============================================================
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    probs = 1 / (1 + np.exp(-logits))
-    preds = (probs > 0.35).astype(int)
+# --------------------------
+# Evaluation Metrics
+# --------------------------
+def compute_metrics(pred):
+    logits, labels = pred
+    preds = (1 / (1 + np.exp(-logits))) > 0.5  # sigmoid threshold
+    micro = f1_score(labels, preds, average="micro", zero_division=0)
+    macro = f1_score(labels, preds, average="macro", zero_division=0)
     return {
-        "f1_micro": f1_score(labels, preds, average="micro", zero_division=0),
-        "f1_macro": f1_score(labels, preds, average="macro", zero_division=0),
+        "f1_micro": micro,
+        "f1_macro": macro
     }
 
-
-# ============================================================
-# 7. TRAINING SETTINGS
-# ============================================================
+# --------------------------
+# Training Arguments
+# --------------------------
 training_args = TrainingArguments(
-    output_dir="./models/meraki_sentence_tagger",
-    overwrite_output_dir=True,
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
+    output_dir=OUTPUT_DIR,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
     num_train_epochs=8,
     learning_rate=2e-5,
-    warmup_ratio=0.1,
     evaluation_strategy="epoch",
     save_strategy="epoch",
-    logging_steps=25,
     load_best_model_at_end=True,
     metric_for_best_model="f1_micro",
     greater_is_better=True,
-    report_to="none",
 )
 
-
-# ============================================================
-# 8. TRAIN
-# ============================================================
-trainer = DebugTrainer(
+# --------------------------
+# Trainer
+# --------------------------
+trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=tokenized["train"],
-    eval_dataset=tokenized["test"],
-    tokenizer=tokenizer,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
     compute_metrics=compute_metrics,
 )
 
-print("\n🚀 START TRAINING\n")
+print("🚀 Starting fine-tuning...")
 trainer.train()
+trainer.save_model(OUTPUT_DIR)
 
-trainer.save_model("./models/meraki_sentence_tagger")
-tokenizer.save_pretrained("./models/meraki_sentence_tagger")
+# Save ML-Binarizer for inference
+import pickle
+with open(os.path.join(OUTPUT_DIR, "mlb.pkl"), "wb") as f:
+    pickle.dump(mlb, f)
 
-print("\n🎉 Fine-tuning complete!")
+print("🎉 Training complete! Model saved.")

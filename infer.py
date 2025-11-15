@@ -1,86 +1,82 @@
-import os
 import json
 import torch
 import numpy as np
-import pandas as pd
-import nltk
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-torch.backends.mps.is_available = lambda: False
-torch.backends.mps.is_built = lambda: False
 DEVICE = torch.device("cpu")
-
 print("🔥 Using device:", DEVICE)
 
+# ------------------------------------------------------------
+# Load model + tokenizer + label map
+# ------------------------------------------------------------
+MODEL_DIR = "./models/meraki_sentence_tagger"
 
-# ---------------------------------------------------------
-# Load best checkpoint
-# ---------------------------------------------------------
-def get_best_checkpoint(model_dir="./models/meraki_sentence_tagger"):
-    args_path = os.path.join(model_dir, "training_args.bin")
-    torch.serialization.add_safe_globals([TrainingArguments])
-    args = torch.load(args_path, map_location="cpu", weights_only=False)
+print(f"\n🔥 Loading best checkpoint: {MODEL_DIR}\n")
 
-    if getattr(args, "best_model_checkpoint", None):
-        return args.best_model_checkpoint
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR).to(DEVICE)
+model.eval()
 
-    ckpts = [os.path.join(model_dir, d)
-             for d in os.listdir(model_dir)
-             if d.startswith("checkpoint-")]
+id2label = json.load(open("./models/id2label.json"))
+num_labels = len(id2label)
 
-    ckpts = sorted(ckpts, key=lambda x: int(x.split("checkpoint-")[-1]))
-    return ckpts[-1]
-
-
-BEST = get_best_checkpoint()
-print(f"\n🔥 Loading best checkpoint: {BEST}\n")
-
-tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-base")
-model = AutoModelForSequenceClassification.from_pretrained(BEST).to(DEVICE)
-id2tag = json.load(open("./models/id2tag.json"))
-
-
-# ---------------------------------------------------------
+# ------------------------------------------------------------
 # Prediction function
-# ---------------------------------------------------------
-def predict(sentence, threshold=0.30):
-    enc = tokenizer(sentence, return_tensors="pt",
-                    truncation=True, padding=True,
-                    max_length=128).to(DEVICE)
+# ------------------------------------------------------------
+def predict(sentence, threshold=0.30, top_k=5):
+    encoding = tokenizer(
+        sentence,
+        truncation=True,
+        padding=True,
+        max_length=128,
+        return_tensors="pt"
+    )
 
     with torch.no_grad():
-        logits = model(**enc).logits
-        probs = torch.sigmoid(logits).cpu().numpy()[0]
+        logits = model(**encoding.to(DEVICE)).logits.squeeze(0)
 
-    tags = [id2tag[str(i)] for i, p in enumerate(probs) if p > threshold]
-    return tags
+    probs = torch.sigmoid(logits).cpu().numpy()
+
+    # Sort by highest probability
+    sorted_idx = np.argsort(probs)[::-1]
+
+    results = []
+    for idx in sorted_idx:
+        label = id2label[str(idx)]
+        score = probs[idx]
+
+        if score >= threshold:
+            results.append((label, float(score)))
+
+        # If nothing is above threshold, return top_k anyway
+    if len(results) == 0:
+        for idx in sorted_idx[:top_k]:
+            label = id2label[str(idx)]
+            score = float(probs[idx])
+            results.append((label, score))
+
+    return results
 
 
-def tag_paragraph(text):
-    sentences = nltk.sent_tokenize(text)
-    rows = []
+# ------------------------------------------------------------
+# Demo sentences
+# ------------------------------------------------------------
+sentences = [
+    "The team distributed food and water in the southern camps.",
+    "Health clinics are overwhelmed by cholera cases.",
+    "Many families still lack access to education for their children.",
+    "I am really happy.",
+    "The new infrastructure has been really useful."
+]
 
-    for s in sentences:
-        t = predict(s)
-        print(f"• {s} → {t}")
-        rows.append({"Sentence": s, "Tags": ", ".join(t)})
+print("\n================ PREDICTIONS ================\n")
 
-    return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------
-# Example
-# ---------------------------------------------------------
-example = """
-The team distributed food and water in the southern camps.
-Health clinics are overwhelmed by cholera cases.
-Many families still lack access to education for their children.
-I am really happy.
-The new infrastructure has been really useful.
-"""
-
-df = tag_paragraph(example)
-print("\nFinal table:\n", df)
-
-df.to_csv("./tagged_output.csv", index=False)
-print("\n✅ Saved to tagged_output.csv")
+for s in sentences:
+    preds = predict(s, threshold=0.30)
+    print(f"• {s}")
+    if preds:
+        for lbl, score in preds:
+            print(f"   → {lbl}  ({score:.3f})")
+    else:
+        print("   → No tags")
+    print()
