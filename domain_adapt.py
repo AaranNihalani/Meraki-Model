@@ -16,7 +16,7 @@ torch.backends.mps.is_available = lambda: False
 torch.backends.mps.is_built = lambda: False
 
 DEVICE = torch.device("cpu")
-BASE_MODEL = "microsoft/deberta-base"
+BASE_MODEL = "microsoft/deberta-v3-large"
 
 print("🔥 Training device:", DEVICE)
 
@@ -101,15 +101,16 @@ if len(corpus) > 0:
     args = TrainingArguments(
         output_dir="./models/domain_adapted",
         overwrite_output_dir=True,
-        num_train_epochs=5,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=8,
-        learning_rate=5e-5,
+        num_train_epochs=3,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=16,
+        learning_rate=2e-5,
         logging_steps=25,
         save_strategy="epoch",
         report_to="none",
         logging_dir="./logs/mlm",
         dataloader_pin_memory=False,
+        gradient_checkpointing=True,
     )
 
     # ============================================================

@@ -49,6 +49,8 @@ print(f"🔎 Example classes: {mlb.classes_[:10]}")
 # --------------------------
 # Tokenizer & Model
 # --------------------------
+if not os.path.exists(MODEL_NAME):
+    MODEL_NAME = "microsoft/deberta-v3-large"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 # Mistral models need a padding token
@@ -111,8 +113,9 @@ def compute_metrics(pred):
 # --------------------------
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
+    per_device_train_batch_size=2,
+    per_device_eval_batch_size=2,
+    gradient_accumulation_steps=8,
     num_train_epochs=8,
     learning_rate=2e-5,
     evaluation_strategy="epoch",
@@ -121,6 +124,9 @@ training_args = TrainingArguments(
     metric_for_best_model="f1_micro",
     greater_is_better=True,
     logging_steps=20,
+    warmup_ratio=0.1,
+    weight_decay=0.01,
+    gradient_checkpointing=True,
 )
 
 # --------------------------
