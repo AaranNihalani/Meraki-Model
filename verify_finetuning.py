@@ -5,7 +5,7 @@ from transformers import AutoModelForSequenceClassification, AutoModelForMaskedL
 # ---------------------------------------------------------
 # PATHS — adjust if needed
 # ---------------------------------------------------------
-BASE_MODEL = "microsoft/deberta-base"
+BASE_MODEL = "microsoft/deberta-v3-large"
 ADAPTED_DIR = "./models/domain_adapted"
 FINETUNED_DIR = "./models/meraki_sentence_tagger"
 

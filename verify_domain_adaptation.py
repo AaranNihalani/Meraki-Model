@@ -2,7 +2,7 @@ import os
 import torch
 from transformers import AutoModelForMaskedLM
 
-BASE_MODEL = "microsoft/deberta-base"
+BASE_MODEL = "microsoft/deberta-v3-large"
 ADAPTED_DIR = "./models/domain_adapted"
 
 print("\n🔍 Checking domain-adaptation weight changes...")
