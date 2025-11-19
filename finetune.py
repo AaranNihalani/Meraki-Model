@@ -139,18 +139,32 @@ neg_counts = (len(sentences) - pos_counts).astype(np.float64)
 safe_pos = np.where(pos_counts > 0, pos_counts, 1.0)
 pos_weight_vec = torch.tensor(neg_counts / safe_pos, dtype=torch.float)
 
+# --------------------------
+# Weighted Trainer
+# --------------------------
 class WeightedTrainer(Trainer):
     def __init__(self, *args, pos_weight=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pos_weight = pos_weight
+
+        # Move pos_weight to the same device as the model
+        device = self.model.device
+        self.pos_weight = pos_weight.to(device)
+
+        # Create BCE loss with device-correct pos_weight
         self.bce = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        labels = inputs.pop("labels")
+        # Move all batch tensors to model device
+        device = model.device
+        labels = inputs.pop("labels").to(device)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
         outputs = model(**inputs)
         logits = outputs.get("logits")
+
         loss = self.bce(logits, labels)
         return (loss, outputs) if return_outputs else loss
+
 
 trainer = WeightedTrainer(
     model=model,
