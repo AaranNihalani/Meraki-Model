@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import torch.nn as nn
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -79,7 +80,7 @@ class MerakiDataset(Dataset):
             self.sentences[idx],
             truncation=True,
             padding="max_length",
-            max_length=256
+            max_length=384
         )
         encoding = {k: torch.tensor(v) for k, v in encoding.items()}
         encoding["labels"] = torch.tensor(self.labels[idx]).float()
@@ -132,12 +133,32 @@ training_args = TrainingArguments(
 # --------------------------
 # Trainer
 # --------------------------
-trainer = Trainer(
+pos_counts = label_matrix.sum(axis=0).astype(np.float64)
+neg_counts = (len(sentences) - pos_counts).astype(np.float64)
+# avoid div by zero; if a label has no positives, set a moderate weight
+safe_pos = np.where(pos_counts > 0, pos_counts, 1.0)
+pos_weight_vec = torch.tensor(neg_counts / safe_pos, dtype=torch.float)
+
+class WeightedTrainer(Trainer):
+    def __init__(self, *args, pos_weight=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pos_weight = pos_weight
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+        loss = self.bce(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+trainer = WeightedTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     compute_metrics=compute_metrics,
+    pos_weight=pos_weight_vec,
 )
 
 print("🚀 Starting fine-tuning...")
@@ -157,5 +178,29 @@ with open(os.path.join(OUTPUT_DIR, "mlb.pkl"), "wb") as f:
 id2label = {i: label for i, label in enumerate(mlb.classes_)}
 with open(os.path.join(OUTPUT_DIR, "id2label.json"), "w") as f:
     json.dump(id2label, f, indent=2)
+
+# --------------------------
+# Per-label threshold tuning
+# --------------------------
+pred = trainer.predict(val_dataset)
+logits = pred.predictions
+labels = pred.label_ids
+probs = 1 / (1 + np.exp(-logits))
+
+thresholds = {}
+for i in range(num_labels):
+    best_f1 = -1.0
+    best_t = 0.5
+    # search thresholds from 0.05 to 0.95
+    for t in np.linspace(0.05, 0.95, 19):
+        preds_i = (probs[:, i] > t).astype(int)
+        f1_i = f1_score(labels[:, i], preds_i, average="binary", zero_division=0)
+        if f1_i > best_f1:
+            best_f1 = f1_i
+            best_t = t
+    thresholds[mlb.classes_[i]] = float(best_t)
+
+with open(os.path.join(OUTPUT_DIR, "thresholds.json"), "w") as f:
+    json.dump(thresholds, f, indent=2)
 
 print("🎉 Training complete! Model saved.")

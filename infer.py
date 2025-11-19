@@ -24,6 +24,7 @@ nltk.download("punkt", quiet=True)
 MODEL_DIR = "./models/meraki_sentence_tagger"
 ID2LABEL_PATH = os.path.join(MODEL_DIR, "id2label.json")
 MLB_PATH = os.path.join(MODEL_DIR, "mlb.pkl")
+THRESHOLDS_PATH = os.path.join(MODEL_DIR, "thresholds.json")
 
 print("🔥 Using device:", DEVICE)
 print("🔥 Loading best checkpoint:", MODEL_DIR)
@@ -36,6 +37,13 @@ model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR).to(DEVICE)
 
 # Load id2label mapping
 id2label = json.load(open(ID2LABEL_PATH))
+thresholds = None
+if os.path.exists(THRESHOLDS_PATH):
+    try:
+        thresholds = json.load(open(THRESHOLDS_PATH))
+        print("⚖️ Loaded per-label thresholds")
+    except Exception:
+        thresholds = None
 
 # Load binarizer
 import pickle
@@ -53,14 +61,16 @@ def predict(sentence, threshold=0.20, top_k=5):
         logits = model(**inputs).logits
         probs = torch.sigmoid(logits)[0].cpu().numpy()
 
-    # top-k sorted
-    top_indices = probs.argsort()[::-1][:top_k]
-
+    # apply per-label thresholds if available
     results = []
-    for idx in top_indices:
+    for idx in range(len(probs)):
+        label = id2label[str(idx)]
+        thr = thresholds.get(label, threshold) if thresholds else threshold
         score = float(probs[idx])
-        if score >= threshold:
-            results.append((id2label[str(idx)], score))
+        if score >= thr:
+            results.append((label, score))
+    # keep top_k by score
+    results = sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
 
     return results
 
