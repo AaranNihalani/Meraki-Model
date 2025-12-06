@@ -116,8 +116,8 @@ async def predict(request: AnalyzeRequest):
                     return cfg_id2label[idx]
             return f"LABEL_{idx}"
 
-        DEFAULT_THRESHOLD = 0.20
-        HIGH_CONF_THRESHOLD = 0.70
+        DEFAULT_THRESHOLD = 0.25
+        HIGH_CONF_THRESHOLD = 0.65
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
@@ -130,6 +130,14 @@ async def predict(request: AnalyzeRequest):
                     valid_tags.append({"label": label, "score": round(float(score), 3)})
 
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
+
+            if not valid_tags:
+                import numpy as _np
+                best_id = int(_np.argmax(sent_probs))
+                best_label = resolve_label(best_id)
+                best_score = round(float(sent_probs[best_id]), 3)
+                valid_tags = [{"label": best_label, "score": best_score}]
+
             results.append({"sentence": sentence_case(sentence), "tags": valid_tags[:2]})
 
     except Exception as e:
