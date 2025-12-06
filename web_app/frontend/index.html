@@ -28,12 +28,12 @@
                         <span id="btnText">Analyze Text</span>
                         <div id="loader" class="spinner hidden"></div>
                     </button>
+                    <button id="uploadBtn" onclick="selectFile()">
+                        Upload File
+                    </button>
+                    <input type="file" id="fileInput" accept=".txt,.docx,.pdf" style="display:none">
                     <button id="clearBtn" onclick="clearText()" class="secondary">Clear</button>
                     <button id="tableBtn" onclick="renderTable()" class="secondary">Table View</button>
-                </div>
-                <div class="actions">
-                    <input type="file" id="fileInput" accept=".txt,.docx,.pdf">
-                    <button id="uploadBtn" onclick="uploadFile()" class="secondary">Upload & Extract</button>
                 </div>
             </div>
 

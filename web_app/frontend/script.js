@@ -9,6 +9,7 @@ const resultsSection = document.getElementById('resultsSection');
 const resultsList = document.getElementById('resultsList');
 const sentenceCount = document.getElementById('sentenceCount');
 const fileInput = document.getElementById('fileInput');
+const uploadBtn = document.getElementById('uploadBtn');
 
 let lastResults = null;
 
@@ -143,6 +144,16 @@ async function uploadFile() {
         setLoading(false);
     }
 }
+
+function selectFile() {
+    fileInput.click();
+}
+
+fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) {
+        uploadFile();
+    }
+});
 
 function renderTable() {
     if (!lastResults || lastResults.length === 0) {

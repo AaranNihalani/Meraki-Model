@@ -124,17 +124,17 @@ button {
     gap: 0.5rem;
 }
 
-#analyzeBtn {
+#analyzeBtn, #uploadBtn {
     background-color: var(--primary);
     color: white;
 }
 
-#analyzeBtn:hover {
+#analyzeBtn:hover, #uploadBtn:hover {
     background-color: var(--primary-hover);
     transform: translateY(-1px);
 }
 
-#analyzeBtn:disabled {
+#analyzeBtn:disabled, #uploadBtn:disabled {
     opacity: 0.7;
     cursor: not-allowed;
     transform: none;
