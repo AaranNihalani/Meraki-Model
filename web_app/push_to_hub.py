@@ -1,7 +1,7 @@
 import os
 from huggingface_hub import HfApi, create_repo
 
-MODEL_PATH = "../models/meraki_sentence_tagger"
+MODEL_PATH = "./models/meraki_sentence_tagger"
 REPO_ID = "AaranNihalani/MerakiTagger"
 TOKEN = os.getenv("HF_TOKEN")
 
