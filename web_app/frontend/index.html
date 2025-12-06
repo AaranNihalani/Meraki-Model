@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meraki Tagger</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <span class="logo-icon">✨</span>
+                <h1>Meraki Tagger</h1>
+            </div>
+            <p class="subtitle">AI-powered sentence classification for humanitarian data.</p>
+        </header>
+
+        <!-- Input Section -->
+        <main>
+            <div class="input-card">
+                <textarea id="inputText" placeholder="Paste your paragraph here (e.g., 'The team distributed food...')..."></textarea>
+                <div class="actions">
+                    <button id="analyzeBtn" onclick="analyzeText()">
+                        <span id="btnText">Analyze Text</span>
+                        <div id="loader" class="spinner hidden"></div>
+                    </button>
+                    <button id="clearBtn" onclick="clearText()" class="secondary">Clear</button>
+                </div>
+            </div>
+
+            <!-- Error Message -->
+            <div id="errorMsg" class="error-banner hidden"></div>
+
+            <!-- Results Section -->
+            <div id="resultsSection" class="results-container hidden">
+                <div class="results-header">
+                    <h2>Analysis Results</h2>
+                    <span id="sentenceCount" class="badge-count">0 Sentences</span>
+                </div>
+                <div id="resultsList" class="results-list">
+                    <!-- Cards injected by JS -->
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Powered by Meraki Labs & Hugging Face Inference API</p>
+        </footer>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
