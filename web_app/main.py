@@ -38,9 +38,10 @@ except Exception as e:
     print(f"❌ Critical Error loading model: {e}")
     raise e
 
-# Load thresholds locally from backend folder (or download if needed, but we packaged it)
+# Load thresholds and id2label locally from backend folder
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 THRESHOLDS_PATH = os.path.join(BASE_DIR, "backend", "thresholds.json")
+ID2LABEL_PATH = os.path.join(BASE_DIR, "backend", "id2label.json")
 
 try:
     with open(THRESHOLDS_PATH, "r") as f:
@@ -49,6 +50,14 @@ try:
 except Exception as e:
     print(f"⚠️ Warning: Could not load thresholds.json: {e}")
     THRESHOLDS = {}
+
+try:
+    with open(ID2LABEL_PATH, "r") as f:
+        LOCAL_ID2LABEL = json.load(f)
+    print("✅ Loaded id2label mapping.")
+except Exception as e:
+    print(f"⚠️ Warning: Could not load id2label.json: {e}")
+    LOCAL_ID2LABEL = None
 
 # ---------------------------------------------------------
 # Logic
@@ -78,39 +87,40 @@ async def predict(request: AnalyzeRequest):
     try:
         # Tokenize all sentences at once (padding to longest in batch)
         inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True, max_length=384)
-        
+
         with torch.no_grad():
             logits = model(**inputs).logits
-            # Sigmoid for multi-label
             probs = torch.sigmoid(logits).numpy()
-            
-        # 3. Process results
-        # Get id2label from model config
-        id2label = model.config.id2label
+
+        cfg_id2label = getattr(model.config, "id2label", None)
+
+        def resolve_label(idx):
+            if LOCAL_ID2LABEL:
+                return LOCAL_ID2LABEL.get(str(idx)) or LOCAL_ID2LABEL.get(idx)
+            if isinstance(cfg_id2label, dict):
+                return cfg_id2label.get(idx) or cfg_id2label.get(str(idx))
+            if isinstance(cfg_id2label, list):
+                if 0 <= idx < len(cfg_id2label):
+                    return cfg_id2label[idx]
+            return f"LABEL_{idx}"
+
+        DEFAULT_THRESHOLD = 0.20
+        TOP_K = 5
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
             valid_tags = []
 
-            # Check every class score against threshold
             for label_id, score in enumerate(sent_probs):
-                label = id2label[str(label_id)] # id2label keys are usually strings in config
-                
-                thresh = THRESHOLDS.get(label, 0.5)
-                
-                if score >= thresh:
-                    valid_tags.append({
-                        "label": label,
-                        "score": round(float(score), 3)
-                    })
-            
-            # Sort tags by confidence
-            valid_tags.sort(key=lambda x: x['score'], reverse=True)
-            
-            results.append({
-                "sentence": sentence,
-                "tags": valid_tags
-            })
+                label = resolve_label(label_id)
+                thr = THRESHOLDS.get(label, DEFAULT_THRESHOLD)
+                if score >= thr:
+                    valid_tags.append({"label": label, "score": round(float(score), 3)})
+
+            valid_tags.sort(key=lambda x: x["score"], reverse=True)
+            valid_tags = valid_tags[:TOP_K]
+
+            results.append({"sentence": sentence, "tags": valid_tags})
 
     except Exception as e:
         print(f"Inference Error: {e}")
