@@ -44,4 +44,4 @@ venv.bak/
 data/
 models/
 logs/
-tagged_sentences.xlsx
+.trae
