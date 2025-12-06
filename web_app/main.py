@@ -68,6 +68,14 @@ class AnalyzeRequest(BaseModel):
 def normalize_text(text):
     return " ".join([l.strip() for l in text.split("\n") if l.strip()])
 
+def split_on_full_stop(text):
+    parts = [p.strip() for p in text.split('.')]
+    return [p for p in parts if p]
+
+def sentence_case(s):
+    s = s.strip()
+    return (s[:1].upper() + s[1:]) if s else s
+
 @app.post("/api/predict")
 async def predict(request: AnalyzeRequest):
     raw_text = request.text.strip()
@@ -76,7 +84,7 @@ async def predict(request: AnalyzeRequest):
 
     # 1. Split sentences
     clean_text = normalize_text(raw_text)
-    sentences = nltk.sent_tokenize(clean_text)
+    sentences = split_on_full_stop(clean_text)
 
     results = []
     
@@ -105,7 +113,6 @@ async def predict(request: AnalyzeRequest):
             return f"LABEL_{idx}"
 
         DEFAULT_THRESHOLD = 0.20
-        TOP_K = 5
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
@@ -118,9 +125,7 @@ async def predict(request: AnalyzeRequest):
                     valid_tags.append({"label": label, "score": round(float(score), 3)})
 
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
-            valid_tags = valid_tags[:TOP_K]
-
-            results.append({"sentence": sentence, "tags": valid_tags})
+            results.append({"sentence": sentence_case(sentence), "tags": valid_tags})
 
     except Exception as e:
         print(f"Inference Error: {e}")

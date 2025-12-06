@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meraki Tagger</title>
+    <title>Meraki Labs Sentence Tagger</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,7 +14,7 @@
         <!-- Header -->
         <header>
             <div class="logo">
-                <h1>Meraki Tagger</h1>
+                <h1>Meraki Labs Sentence Tagger</h1>
             </div>
             <p class="subtitle">Multi-label sentence tagging for humanitarian narratives.</p>
         </header>
@@ -29,6 +29,7 @@
                         <div id="loader" class="spinner hidden"></div>
                     </button>
                     <button id="clearBtn" onclick="clearText()" class="secondary">Clear</button>
+                    <button id="tableBtn" onclick="renderTable()" class="secondary">Table View</button>
                 </div>
             </div>
 
@@ -43,6 +44,17 @@
                 </div>
                 <div id="resultsList" class="results-list">
                     <!-- Cards injected by JS -->
+                </div>
+                <div id="resultsTable" class="hidden">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Sentence</th>
+                                <th>Tags</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsTbody"></tbody>
+                    </table>
                 </div>
             </div>
         </main>

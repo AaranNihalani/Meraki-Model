@@ -9,6 +9,8 @@ const resultsSection = document.getElementById('resultsSection');
 const resultsList = document.getElementById('resultsList');
 const sentenceCount = document.getElementById('sentenceCount');
 
+let lastResults = null;
+
 async function analyzeText() {
     const text = inputText.value.trim();
     if (!text) return;
@@ -32,7 +34,8 @@ async function analyzeText() {
         }
 
         const data = await response.json();
-        renderResults(data.results);
+        lastResults = data.results;
+        renderResults(lastResults);
 
     } catch (err) {
         showError(err.message);
@@ -63,9 +66,9 @@ function renderResults(results) {
         if (item.tags.length > 0) {
             item.tags.forEach(tag => {
                 const tagSpan = document.createElement('span');
-                // Highlight high confidence tags
-                const isHighConf = tag.score > 0.7;
-                tagSpan.className = `tag ${isHighConf ? 'high-conf' : ''}`;
+                const isHighConf = tag.score >= 0.7;
+                const isLowConf = tag.score < 0.7;
+                tagSpan.className = `tag ${isHighConf ? 'high-conf' : ''} ${isLowConf ? 'low-conf' : ''}`;
                 tagSpan.innerHTML = `${tag.label} <span class="tag-score">${Math.round(tag.score * 100)}%</span>`;
                 tagsDiv.appendChild(tagSpan);
             });
@@ -112,4 +115,31 @@ function clearText() {
     inputText.focus();
     resultsSection.classList.add('hidden');
     showError(null);
+}
+
+function renderTable() {
+    if (!lastResults || lastResults.length === 0) {
+        showError('No results to show. Analyze text first.');
+        return;
+    }
+    const tbody = document.getElementById('resultsTbody');
+    const table = document.getElementById('resultsTable');
+    tbody.innerHTML = '';
+    lastResults.forEach(item => {
+        const tr = document.createElement('tr');
+        const tdSentence = document.createElement('td');
+        tdSentence.textContent = item.sentence;
+        const tdTags = document.createElement('td');
+        if (item.tags.length > 0) {
+            tdTags.textContent = item.tags.map(t => `${t.label} (${Math.round(t.score * 100)}%)`).join(', ');
+        } else {
+            tdTags.textContent = '';
+        }
+        tr.appendChild(tdSentence);
+        tr.appendChild(tdTags);
+        tbody.appendChild(tr);
+    });
+    document.getElementById('resultsSection').classList.remove('hidden');
+    table.classList.remove('hidden');
+    table.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }

@@ -232,6 +232,12 @@ button {
     border-color: #bbf7d0;
 }
 
+.tag.low-conf {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fde68a;
+}
+
 .tag-score {
     opacity: 0.7;
     font-size: 0.75em;
@@ -261,6 +267,27 @@ footer {
     margin-top: 4rem;
     color: #94a3b8;
     font-size: 0.85rem;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+
+thead th {
+    background: #f8fafc;
+    font-weight: 600;
 }
 
 @keyframes fadeIn {
