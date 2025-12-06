@@ -30,9 +30,9 @@ MODEL_ID = "AaranNihalani/MerakiTagger"
 
 print("🚀 Loading model... (This may take a minute)")
 try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=False)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
-    model.eval()  # Set to evaluation mode
+    model.eval()
     print("✅ Model loaded successfully.")
 except Exception as e:
     print(f"❌ Critical Error loading model: {e}")
