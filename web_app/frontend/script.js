@@ -8,6 +8,7 @@ const errorMsg = document.getElementById('errorMsg');
 const resultsSection = document.getElementById('resultsSection');
 const resultsList = document.getElementById('resultsList');
 const sentenceCount = document.getElementById('sentenceCount');
+const fileInput = document.getElementById('fileInput');
 
 let lastResults = null;
 
@@ -115,6 +116,32 @@ function clearText() {
     inputText.focus();
     resultsSection.classList.add('hidden');
     showError(null);
+}
+
+async function uploadFile() {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+        showError('Select a file first.');
+        return;
+    }
+    setLoading(true);
+    showError(null);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+        const resp = await fetch('/api/upload', { method: 'POST', body: form });
+        if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.detail || 'Upload failed');
+        }
+        const data = await resp.json();
+        inputText.value = data.text || '';
+        inputText.focus();
+    } catch (e) {
+        showError(e.message);
+    } finally {
+        setLoading(false);
+    }
 }
 
 function renderTable() {

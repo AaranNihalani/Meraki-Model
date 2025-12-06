@@ -4,11 +4,12 @@ import nltk
 import torch
 import numpy as np
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import io
 
 # Ensure nltk data
 nltk.download("punkt", quiet=True)
@@ -168,6 +169,44 @@ async def predict(request: AnalyzeRequest):
         print(f"Supabase write failed: {e}")
 
     return {"results": results}
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)):
+    name = file.filename or ""
+    ext = os.path.splitext(name)[1].lower()
+    data = await file.read()
+    text = ""
+    if ext == ".txt":
+        try:
+            text = data.decode("utf-8", errors="ignore")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid text file")
+    elif ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(data))
+            parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+            text = "\n".join(parts)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Failed to read DOCX")
+    elif ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            parts = []
+            for page in reader.pages:
+                t = page.extract_text() or ""
+                t = t.strip()
+                if t:
+                    parts.append(t)
+            text = "\n".join(parts)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Failed to read PDF")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="No text extracted")
+    return {"text": normalize_text(text)}
 
 # Serve frontend static files
 app.mount("/", StaticFiles(directory="frontend", html=True), name="static")

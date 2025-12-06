@@ -12,3 +12,6 @@ tokenizers==0.15.1
 sentencepiece
 protobuf
 safetensors
+python-multipart
+python-docx
+pypdf
