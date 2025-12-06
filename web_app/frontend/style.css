@@ -190,6 +190,19 @@ button {
     gap: 1rem;
 }
 
+.divider {
+    height: 1px;
+    background: var(--border);
+    margin: 1.5rem 0 0.75rem 0;
+}
+
+.section-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-sub);
+    margin-bottom: 0.75rem;
+}
+
 .result-card {
     background: var(--card-bg);
     padding: 1.25rem;

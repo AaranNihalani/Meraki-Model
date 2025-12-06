@@ -3,6 +3,7 @@ import json
 import nltk
 import torch
 import numpy as np
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,9 @@ app.add_middleware(
 # Configuration & Model Loading
 # ---------------------------------------------------------
 MODEL_ID = "AaranNihalani/MerakiTagger"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://keljpfqgfjzvmgffdenf.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "inference_results")
 
 print("🚀 Loading model... (This may take a minute)")
 try:
@@ -113,6 +117,7 @@ async def predict(request: AnalyzeRequest):
             return f"LABEL_{idx}"
 
         DEFAULT_THRESHOLD = 0.20
+        HIGH_CONF_THRESHOLD = 0.70
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
@@ -120,16 +125,39 @@ async def predict(request: AnalyzeRequest):
 
             for label_id, score in enumerate(sent_probs):
                 label = resolve_label(label_id)
-                thr = THRESHOLDS.get(label, DEFAULT_THRESHOLD)
+                thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), HIGH_CONF_THRESHOLD)
                 if score >= thr:
                     valid_tags.append({"label": label, "score": round(float(score), 3)})
 
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
-            results.append({"sentence": sentence_case(sentence), "tags": valid_tags})
+            results.append({"sentence": sentence_case(sentence), "tags": valid_tags[:2]})
 
     except Exception as e:
         print(f"Inference Error: {e}")
         raise HTTPException(status_code=500, detail=f"Model inference failed: {str(e)}")
+
+    try:
+        if SUPABASE_KEY:
+            import requests
+            url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+            payload = []
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for item in results:
+                payload.append({
+                    "sentence": item["sentence"],
+                    "tags": item["tags"],
+                    "raw_text": raw_text,
+                    "created_at": now_iso
+                })
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
+            requests.post(url, headers=headers, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Supabase write failed: {e}")
 
     return {"results": results}
 
