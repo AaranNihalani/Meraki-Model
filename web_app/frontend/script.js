@@ -11,6 +11,10 @@ const sentenceCount = document.getElementById('sentenceCount');
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
 
+const codebookInput = document.getElementById('codebookInput');
+const uploadCodebookBtn = document.getElementById('uploadCodebookBtn');
+const codebookMsg = document.getElementById('codebookMsg');
+
 let lastResults = null;
 
 async function analyzeText() {
@@ -71,7 +75,20 @@ function renderResults(results) {
                 const isHighConf = tag.score >= 0.7;
                 const isLowConf = tag.score < 0.7;
                 tagSpan.className = `tag ${isHighConf ? 'high-conf' : ''} ${isLowConf ? 'low-conf' : ''}`;
-                tagSpan.innerHTML = `${tag.label} <span class="tag-score">${Math.round(tag.score * 100)}%</span>`;
+                
+                // Create tooltip content
+                let explanationText = '';
+                if (tag.explanation) {
+                    explanationText = `
+                        <div class="tag-explanation">
+                            <strong>${tag.label}</strong><br>
+                            Definition: ${tag.explanation.definition || 'N/A'}<br>
+                            Alignment: ${tag.explanation.alignment_score ? (tag.explanation.alignment_score * 100).toFixed(1) + '%' : 'N/A'}
+                        </div>
+                    `;
+                }
+
+                tagSpan.innerHTML = `${tag.label} <span class="tag-score">${Math.round(tag.score * 100)}%</span>${explanationText}`;
                 tagsDiv.appendChild(tagSpan);
             });
         } else {
@@ -155,6 +172,52 @@ fileInput.addEventListener('change', () => {
     }
 });
 
+function selectCodebookFile() {
+    codebookInput.click();
+}
+
+async function uploadCodebook() {
+    const file = codebookInput.files && codebookInput.files[0];
+    if (!file) return;
+
+    const form = new FormData();
+    form.append('file', file);
+    
+    uploadCodebookBtn.disabled = true;
+    uploadCodebookBtn.textContent = 'Uploading...';
+    codebookMsg.className = 'hidden';
+
+    try {
+        const resp = await fetch('/api/codebook', { method: 'POST', body: form });
+        if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.detail || 'Codebook upload failed');
+        }
+        const data = await resp.json();
+        codebookMsg.textContent = `Success: ${data.message || 'Codebook updated'}`;
+        codebookMsg.className = 'success-msg'; // You might need to add this class to CSS or reuse existing
+        codebookMsg.style.color = 'var(--success)';
+        codebookMsg.style.marginTop = '0.5rem';
+        codebookMsg.classList.remove('hidden');
+    } catch (e) {
+        codebookMsg.textContent = `Error: ${e.message}`;
+        codebookMsg.className = 'error-msg'; // You might need to add this class
+        codebookMsg.style.color = 'var(--error)';
+        codebookMsg.style.marginTop = '0.5rem';
+        codebookMsg.classList.remove('hidden');
+    } finally {
+        uploadCodebookBtn.disabled = false;
+        uploadCodebookBtn.textContent = 'Upload Codebook';
+        codebookInput.value = ''; // Reset input
+    }
+}
+
+codebookInput.addEventListener('change', () => {
+    if (codebookInput.files && codebookInput.files[0]) {
+        uploadCodebook();
+    }
+});
+
 function renderTable() {
     if (!lastResults || lastResults.length === 0) {
         showError('No results to show. Analyze text first.');
@@ -165,16 +228,33 @@ function renderTable() {
     tbody.innerHTML = '';
     lastResults.forEach(item => {
         const tr = document.createElement('tr');
+        
         const tdSentence = document.createElement('td');
         tdSentence.textContent = item.sentence;
+        
         const tdTags = document.createElement('td');
+        const tdExplanation = document.createElement('td');
+        tdExplanation.className = 'explanation-cell';
+
         if (item.tags.length > 0) {
             tdTags.textContent = item.tags.map(t => `${t.label} (${Math.round(t.score * 100)}%)`).join(', ');
+            
+            // Format explanations
+            const explanations = item.tags.map(t => {
+                if (t.explanation) {
+                    return `<strong>${t.label}</strong>: ${t.explanation.definition || ''} (Align: ${(t.explanation.alignment_score * 100).toFixed(0)}%)`;
+                }
+                return `<strong>${t.label}</strong>: No explanation`;
+            });
+            tdExplanation.innerHTML = explanations.join('<br>');
         } else {
             tdTags.textContent = '';
+            tdExplanation.textContent = '';
         }
+        
         tr.appendChild(tdSentence);
         tr.appendChild(tdTags);
+        tr.appendChild(tdExplanation);
         tbody.appendChild(tr);
     });
     document.getElementById('resultsSection').classList.remove('hidden');

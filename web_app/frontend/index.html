@@ -57,11 +57,27 @@
                             <tr>
                                 <th>Sentence</th>
                                 <th>Tags</th>
+                                <th>Explanation</th>
                             </tr>
                         </thead>
                         <tbody id="resultsTbody"></tbody>
                     </table>
                 </div>
+            </div>
+
+            <!-- Codebook Management Section -->
+            <div class="codebook-section">
+                <h3>Codebook Management</h3>
+                <div class="codebook-actions">
+                    <button id="uploadCodebookBtn" onclick="selectCodebookFile()">
+                        Upload Codebook
+                    </button>
+                    <input type="file" id="codebookInput" accept=".json,.csv,.xlsx" style="display:none">
+                    <a href="/api/codebook/download" id="downloadCodebookBtn" class="secondary-btn" download>
+                        Download Current Codebook
+                    </a>
+                </div>
+                <div id="codebookMsg" class="hidden"></div>
             </div>
         </main>
 

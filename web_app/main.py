@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import io
+import pandas as pd
+from sentence_transformers import SentenceTransformer, util
 
 # Ensure nltk data
 nltk.download("punkt", quiet=True)
@@ -64,6 +66,52 @@ except Exception as e:
     print(f"⚠️ Warning: Could not load id2label.json: {e}")
     LOCAL_ID2LABEL = None
 
+# Load Sentence Transformer
+print("🚀 Loading Sentence Transformer model... (This may take a minute)")
+try:
+    st_model = SentenceTransformer('all-MiniLM-L6-v2')
+    st_model.eval()
+    print("✅ Sentence Transformer loaded.")
+except Exception as e:
+    print(f"❌ Error loading Sentence Transformer: {e}")
+    st_model = None
+
+# Load Codebook
+CODEBOOK_PATH = os.path.join(BASE_DIR, "backend", "codebook.json")
+CODEBOOK = {}
+CODEBOOK_EMBEDDINGS = {}
+
+def load_codebook():
+    global CODEBOOK, CODEBOOK_EMBEDDINGS
+    try:
+        if os.path.exists(CODEBOOK_PATH):
+            with open(CODEBOOK_PATH, "r") as f:
+                CODEBOOK = json.load(f)
+            print(f"✅ Loaded codebook with {len(CODEBOOK)} entries.")
+            
+            # Precompute embeddings
+            if st_model:
+                labels = list(CODEBOOK.keys())
+                definitions = list(CODEBOOK.values())
+                # Only if definitions are strings
+                definitions = [d if isinstance(d, str) else "" for d in definitions]
+                
+                if definitions:
+                    embeddings = st_model.encode(definitions, convert_to_tensor=True)
+                    CODEBOOK_EMBEDDINGS = {label: emb for label, emb in zip(labels, embeddings)}
+                    print("✅ Precomputed codebook embeddings.")
+        else:
+            print("⚠️ Codebook not found at path.")
+            CODEBOOK = {}
+            CODEBOOK_EMBEDDINGS = {}
+            
+    except Exception as e:
+        print(f"⚠️ Warning: Could not load codebook.json: {e}")
+        CODEBOOK = {}
+        CODEBOOK_EMBEDDINGS = {}
+
+load_codebook()
+
 # ---------------------------------------------------------
 # Logic
 # ---------------------------------------------------------
@@ -80,6 +128,53 @@ def split_on_full_stop(text):
 def sentence_case(s):
     s = s.strip()
     return (s[:1].upper() + s[1:]) if s else s
+
+@app.post("/api/codebook")
+async def update_codebook(file: UploadFile = File(...)):
+    global CODEBOOK, CODEBOOK_EMBEDDINGS
+    
+    filename = file.filename.lower()
+    content = await file.read()
+    new_data = {}
+    
+    try:
+        if filename.endswith(".json"):
+            new_data = json.loads(content)
+        elif filename.endswith(".csv"):
+            try:
+                df = pd.read_csv(io.BytesIO(content))
+            except:
+                # Try different encoding or delimiter
+                df = pd.read_csv(io.BytesIO(content), encoding="ISO-8859-1")
+                
+            if "Label" in df.columns and "Definition" in df.columns:
+                new_data = dict(zip(df["Label"], df["Definition"]))
+            else:
+                new_data = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
+        elif filename.endswith((".xls", ".xlsx")):
+            df = pd.read_excel(io.BytesIO(content))
+            if "Label" in df.columns and "Definition" in df.columns:
+                new_data = dict(zip(df["Label"], df["Definition"]))
+            else:
+                new_data = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
+        else:
+             raise HTTPException(status_code=400, detail="Unsupported file format. Use JSON, CSV, or Excel.")
+             
+        # Update CODEBOOK
+        CODEBOOK.update(new_data)
+        
+        # Save to file
+        with open(CODEBOOK_PATH, "w") as f:
+            json.dump(CODEBOOK, f, indent=2)
+            
+        # Recompute embeddings
+        load_codebook()
+        
+        return {"message": "Codebook updated successfully", "total_entries": len(CODEBOOK)}
+        
+    except Exception as e:
+        print(f"Update Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update codebook: {str(e)}")
 
 @app.post("/api/predict")
 async def predict(request: AnalyzeRequest):
@@ -105,6 +200,14 @@ async def predict(request: AnalyzeRequest):
             logits = model(**inputs).logits
             probs = torch.sigmoid(logits).numpy()
 
+        # Compute Sentence Transformer embeddings for input sentences
+        sent_embeddings = None
+        if st_model:
+            try:
+                sent_embeddings = st_model.encode(sentences, convert_to_tensor=True)
+            except Exception as e:
+                print(f"ST Encode Error: {e}")
+
         cfg_id2label = getattr(model.config, "id2label", None)
 
         def resolve_label(idx):
@@ -122,13 +225,34 @@ async def predict(request: AnalyzeRequest):
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
+            sent_emb = sent_embeddings[i] if sent_embeddings is not None else None
             valid_tags = []
 
             for label_id, score in enumerate(sent_probs):
                 label = resolve_label(label_id)
                 thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), HIGH_CONF_THRESHOLD)
+                
                 if score >= thr:
-                    valid_tags.append({"label": label, "score": round(float(score), 3)})
+                    model_prob = float(score)
+                    final_score = model_prob
+                    alignment_score = 0.0
+                    definition = CODEBOOK.get(label)
+                    
+                    if definition and sent_emb is not None:
+                         if label in CODEBOOK_EMBEDDINGS:
+                             def_emb = CODEBOOK_EMBEDDINGS[label]
+                             sim = util.cos_sim(sent_emb, def_emb).item()
+                             alignment_score = max(0.0, sim)
+                             final_score = (model_prob * 0.7) + (alignment_score * 0.3)
+                    
+                    valid_tags.append({
+                        "label": label, 
+                        "score": round(final_score, 3),
+                        "explanation": {
+                            "definition": definition,
+                            "alignment_score": round(alignment_score, 3)
+                        }
+                    })
 
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
 
@@ -136,8 +260,25 @@ async def predict(request: AnalyzeRequest):
                 import numpy as _np
                 best_id = int(_np.argmax(sent_probs))
                 best_label = resolve_label(best_id)
-                best_score = round(float(sent_probs[best_id]), 3)
-                valid_tags = [{"label": best_label, "score": best_score}]
+                model_prob = float(sent_probs[best_id])
+                final_score = model_prob
+                alignment_score = 0.0
+                definition = CODEBOOK.get(best_label)
+                
+                if definition and sent_emb is not None and best_label in CODEBOOK_EMBEDDINGS:
+                    def_emb = CODEBOOK_EMBEDDINGS[best_label]
+                    sim = util.cos_sim(sent_emb, def_emb).item()
+                    alignment_score = max(0.0, sim)
+                    final_score = (model_prob * 0.7) + (alignment_score * 0.3)
+                
+                valid_tags = [{
+                    "label": best_label, 
+                    "score": round(final_score, 3),
+                    "explanation": {
+                        "definition": definition,
+                        "alignment_score": round(alignment_score, 3)
+                    }
+                }]
 
             results.append({"sentence": sentence_case(sentence), "tags": valid_tags[:2]})
 

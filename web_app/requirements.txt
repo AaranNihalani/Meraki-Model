@@ -15,3 +15,6 @@ safetensors
 python-multipart
 python-docx
 pypdf
+sentence-transformers
+pandas
+openpyxl
