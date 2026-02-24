@@ -15,6 +15,12 @@ from sentence_transformers import SentenceTransformer, util
 
 # Ensure nltk data
 nltk.download("punkt", quiet=True)
+nltk.download("vader_lexicon", quiet=True)
+nltk.download("averaged_perceptron_tagger", quiet=True)
+
+from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.tokenize import word_tokenize
+from nltk.tag import pos_tag
 
 app = FastAPI(title="Meraki Tagger API")
 
@@ -80,16 +86,32 @@ except Exception as e:
 CODEBOOK_PATH = os.path.join(BASE_DIR, "backend", "codebook.json")
 CODEBOOK = {}
 CODEBOOK_EMBEDDINGS = {}
+CODEBOOK_SENTIMENTS = {} # Store sentiment scores of definitions
+CODEBOOK_KEYWORDS = {}   # Store unique nouns from definitions
+
+sia = SentimentIntensityAnalyzer()
+
+def extract_keywords(text):
+    """Extract Nouns/Proper Nouns from text."""
+    try:
+        tokens = word_tokenize(text)
+        tags = pos_tag(tokens)
+        # NNP: Proper Noun Sing, NN: Noun Sing, NNS: Noun Plural, NNPS: Proper Noun Plural
+        keywords = {word.lower() for word, tag in tags if tag in ('NN', 'NNS', 'NNP', 'NNPS')}
+        # Filter out common stopwords if needed, but for now relying on POS is decent
+        return keywords
+    except:
+        return set()
 
 def load_codebook():
-    global CODEBOOK, CODEBOOK_EMBEDDINGS
+    global CODEBOOK, CODEBOOK_EMBEDDINGS, CODEBOOK_SENTIMENTS, CODEBOOK_KEYWORDS
     try:
         if os.path.exists(CODEBOOK_PATH):
             with open(CODEBOOK_PATH, "r") as f:
                 CODEBOOK = json.load(f)
             print(f"✅ Loaded codebook with {len(CODEBOOK)} entries.")
             
-            # Precompute embeddings
+            # Precompute embeddings and metadata
             if st_model:
                 labels = list(CODEBOOK.keys())
                 definitions = list(CODEBOOK.values())
@@ -100,6 +122,18 @@ def load_codebook():
                     embeddings = st_model.encode(definitions, convert_to_tensor=True)
                     CODEBOOK_EMBEDDINGS = {label: emb for label, emb in zip(labels, embeddings)}
                     print("✅ Precomputed codebook embeddings.")
+            
+            # Precompute Sentiments and Keywords
+            CODEBOOK_SENTIMENTS = {}
+            CODEBOOK_KEYWORDS = {}
+            for label, definition in CODEBOOK.items():
+                if isinstance(definition, str):
+                    # Sentiment: compound score (-1 to 1)
+                    CODEBOOK_SENTIMENTS[label] = sia.polarity_scores(definition)['compound']
+                    # Keywords
+                    CODEBOOK_KEYWORDS[label] = extract_keywords(definition)
+            print("✅ Precomputed sentiments and keywords.")
+
         else:
             print("⚠️ Codebook not found at path.")
             CODEBOOK = {}
@@ -241,6 +275,10 @@ async def predict(request: AnalyzeRequest):
             sent_emb = sent_embeddings[i] if sent_embeddings is not None else None
             valid_tags = []
 
+            # 3. Dynamic Analysis of Input Sentence
+            sent_sentiment = sia.polarity_scores(sentence)['compound']
+            sent_keywords = extract_keywords(sentence)
+
             for label_id, score in enumerate(sent_probs):
                 label = resolve_label(label_id)
                 # Use a slightly more aggressive base threshold
@@ -252,13 +290,41 @@ async def predict(request: AnalyzeRequest):
                     alignment_score = 0.0
                     definition = CODEBOOK.get(label)
                     
+                    penalty = 0.0
+
                     if definition and sent_emb is not None:
                          if label in CODEBOOK_EMBEDDINGS:
                              def_emb = CODEBOOK_EMBEDDINGS[label]
                              sim = util.cos_sim(sent_emb, def_emb).item()
                              alignment_score = max(0.0, sim)
-                             # Increase weight of semantic alignment to 60% to heavily punish "hallucinations"
-                             final_score = (model_prob * 0.4) + (alignment_score * 0.6)
+                             
+                             # --- Sentiment Check ---
+                             # If definition is strongly positive (>0.3) and sentence is strongly negative (<-0.3), penalize
+                             def_sent = CODEBOOK_SENTIMENTS.get(label, 0.0)
+                             if def_sent > 0.3 and sent_sentiment < -0.3:
+                                 penalty += 0.4 # Heavy penalty for polarity mismatch
+                             elif def_sent < -0.3 and sent_sentiment > 0.3:
+                                 penalty += 0.4
+
+                             # --- Keyword Overlap Check ---
+                             # If definition has unique keywords (like "Burmese", "English"), check overlap
+                             def_keys = CODEBOOK_KEYWORDS.get(label, set())
+                             # Filter generic words if necessary, but assume codebook is specific
+                             # Check if any key noun in definition exists in sentence
+                             # Relaxed check: Only penalize if definition has keywords but NONE appear in sentence
+                             if def_keys:
+                                 # Compute overlap
+                                 overlap = def_keys.intersection(sent_keywords)
+                                 # If no overlap, check if we are missing a critical specific entity
+                                 # Heuristic: If definition has >0 keywords and 0 overlap, slight penalty
+                                 # But we must be careful not to kill synonyms.
+                                 # Better: Check for "Language" conflict specifically? No, user said no hardcoding.
+                                 # General: If definition has 3+ keywords and 0 match, penalize
+                                 if len(def_keys) >= 2 and len(overlap) == 0:
+                                     penalty += 0.15
+
+                             final_score = (model_prob * 0.4) + (alignment_score * 0.6) - penalty
+                             final_score = max(0.0, final_score)
                     
                     # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
                     # Increased strictness: < 0.35 alignment is likely garbage
@@ -271,7 +337,8 @@ async def predict(request: AnalyzeRequest):
                             "score": round(final_score, 3),
                             "explanation": {
                                 "definition": definition,
-                                "alignment_score": round(alignment_score, 3)
+                                "alignment_score": round(alignment_score, 3),
+                                "sentiment_penalty": penalty
                             }
                         })
 

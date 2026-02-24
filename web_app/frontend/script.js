@@ -85,11 +85,15 @@ function renderResults(results) {
                 // Create tooltip content
                 let explanationText = '';
                 if (tag.explanation) {
+                    const penaltyMsg = tag.explanation.sentiment_penalty > 0 
+                        ? `<br><span class="penalty-text">⚠️ Penalty: -${(tag.explanation.sentiment_penalty * 100).toFixed(0)}% (Mismatch)</span>` 
+                        : '';
                     explanationText = `
                         <div class="tag-explanation">
                             <strong>${tag.label}</strong><br>
                             Definition: ${tag.explanation.definition || 'N/A'}<br>
                             Alignment: ${tag.explanation.alignment_score ? (tag.explanation.alignment_score * 100).toFixed(1) + '%' : 'N/A'}
+                            ${penaltyMsg}
                         </div>
                     `;
                 }
