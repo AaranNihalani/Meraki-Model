@@ -309,19 +309,16 @@ async def predict(request: AnalyzeRequest):
                              # --- Keyword Overlap Check ---
                              # If definition has unique keywords (like "Burmese", "English"), check overlap
                              def_keys = CODEBOOK_KEYWORDS.get(label, set())
-                             # Filter generic words if necessary, but assume codebook is specific
-                             # Check if any key noun in definition exists in sentence
-                             # Relaxed check: Only penalize if definition has keywords but NONE appear in sentence
+                             
                              if def_keys:
                                  # Compute overlap
                                  overlap = def_keys.intersection(sent_keywords)
-                                 # If no overlap, check if we are missing a critical specific entity
-                                 # Heuristic: If definition has >0 keywords and 0 overlap, slight penalty
-                                 # But we must be careful not to kill synonyms.
-                                 # Better: Check for "Language" conflict specifically? No, user said no hardcoding.
-                                 # General: If definition has 3+ keywords and 0 match, penalize
-                                 if len(def_keys) >= 2 and len(overlap) == 0:
-                                     penalty += 0.15
+                                 
+                                 # STRICTER RULE: If definition has 1 or more specific nouns (len>=1) and 0 match, penalize HARD.
+                                 # This forces "English" vs "Burmese" separation.
+                                 if len(def_keys) >= 1 and len(overlap) == 0:
+                                     # Was 0.15, now 0.45 to kill the wrong language tag
+                                     penalty += 0.45
 
                              final_score = (model_prob * 0.4) + (alignment_score * 0.6) - penalty
                              final_score = max(0.0, final_score)
@@ -342,7 +339,28 @@ async def predict(request: AnalyzeRequest):
                             }
                         })
 
+            # --- Post-Processing: Conflict Resolution ---
+            # If multiple tags from same "family" exist (e.g. "Skills Learned: ..."), keep only the winner.
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
+            
+            final_filtered_tags = []
+            seen_prefixes = set()
+            
+            for tag in valid_tags:
+                label = tag["label"]
+                # Detect prefix (e.g. "Skills Learned", "Advocacy Achievement")
+                if ":" in label:
+                    prefix = label.split(":")[0].strip()
+                    # If we already have a higher-score tag from this family, skip this one
+                    if prefix in seen_prefixes:
+                        continue
+                    seen_prefixes.add(prefix)
+                
+                final_filtered_tags.append(tag)
+            
+            valid_tags = final_filtered_tags
+            
+            # --- End Post-Processing ---
 
             if not valid_tags:
                 # Fallback Logic: If no tags passed the strict filter
