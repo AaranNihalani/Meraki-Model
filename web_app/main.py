@@ -176,6 +176,19 @@ async def update_codebook(file: UploadFile = File(...)):
         print(f"Update Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update codebook: {str(e)}")
 
+@app.get("/api/codebook/download")
+async def download_codebook():
+    if not os.path.exists(CODEBOOK_PATH):
+        raise HTTPException(status_code=404, detail="Codebook not found")
+    
+    # Return file as download
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=CODEBOOK_PATH, 
+        filename="codebook.json", 
+        media_type='application/json'
+    )
+
 @app.post("/api/predict")
 async def predict(request: AnalyzeRequest):
     raw_text = request.text.strip()
