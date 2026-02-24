@@ -327,6 +327,11 @@ async def predict(request: AnalyzeRequest):
                     # Increased strictness: < 0.35 alignment is likely garbage
                     if definition and alignment_score < 0.35:
                         continue
+                    
+                    # STRICT VETO: If penalty is high (> 0.4), discard tag entirely.
+                    # This prevents penalized tags from winning just because other scores are low.
+                    if penalty > 0.35:
+                        continue
 
                     if final_score >= thr:
                         valid_tags.append({
@@ -363,46 +368,67 @@ async def predict(request: AnalyzeRequest):
             # --- End Post-Processing ---
 
             if not valid_tags:
-                # Fallback Logic: If no tags passed the strict filter
-                import numpy as _np
-                top_indices = _np.argsort(sent_probs)[-10:] # Look deeper, top 10
-                best_label = None
-                best_final_score = -1.0
-                best_alignment_score = 0.0
-                best_definition = None
+                    # Fallback Logic: If no tags passed the strict filter
+                    import numpy as _np
+                    top_indices = _np.argsort(sent_probs)[-10:] # Look deeper, top 10
+                    best_label = None
+                    best_final_score = -1.0
+                    best_alignment_score = 0.0
+                    best_definition = None
 
-                for idx in top_indices:
-                    idx = int(idx)
-                    lbl = resolve_label(idx)
-                    m_prob = float(sent_probs[idx])
-                    
-                    # Skip if model thinks it's trash (<10%) unless alignment is amazing
-                    if m_prob < 0.10: continue
+                    for idx in top_indices:
+                        idx = int(idx)
+                        lbl = resolve_label(idx)
+                        m_prob = float(sent_probs[idx])
+                        
+                        # Skip if model thinks it's trash (<10%) unless alignment is amazing
+                        if m_prob < 0.10: continue
 
-                    d_def = CODEBOOK.get(lbl)
-                    s_align = 0.0
-                    
-                    if d_def and sent_emb is not None and lbl in CODEBOOK_EMBEDDINGS:
-                        d_emb = CODEBOOK_EMBEDDINGS[lbl]
-                        s_align = max(0.0, util.cos_sim(sent_emb, d_emb).item())
-                    
-                    # Heavily weight alignment in fallback: 70% alignment, 30% model
-                    f_score = (m_prob * 0.3) + (s_align * 0.7)
-                    
-                    if f_score > best_final_score:
-                        best_final_score = f_score
-                        best_label = lbl
-                        best_alignment_score = s_align
-                        best_definition = d_def
+                        d_def = CODEBOOK.get(lbl)
+                        s_align = 0.0
+                        fallback_penalty = 0.0
+                        
+                        if d_def and sent_emb is not None and lbl in CODEBOOK_EMBEDDINGS:
+                            d_emb = CODEBOOK_EMBEDDINGS[lbl]
+                            s_align = max(0.0, util.cos_sim(sent_emb, d_emb).item())
+                            
+                            # Re-run strict checks for fallback candidates
+                            def_keys = CODEBOOK_KEYWORDS.get(lbl, set())
+                            if def_keys:
+                                overlap = def_keys.intersection(sent_keywords)
+                                if len(def_keys) >= 1 and len(overlap) == 0:
+                                    fallback_penalty = 0.45
+                            
+                            # Sentiment check
+                            def_sent = CODEBOOK_SENTIMENTS.get(lbl, 0.0)
+                            if def_sent > 0.3 and sent_sentiment < -0.3:
+                                fallback_penalty += 0.4
+                            elif def_sent < -0.3 and sent_sentiment > 0.3:
+                                fallback_penalty += 0.4
 
-                valid_tags = [{
-                    "label": best_label, 
-                    "score": round(best_final_score, 3),
-                    "explanation": {
-                        "definition": best_definition,
-                        "alignment_score": round(best_alignment_score, 3)
-                    }
-                }]
+                        if fallback_penalty > 0.35: continue
+                        if s_align < 0.25: continue # Minimum alignment for fallback
+
+                        # Heavily weight alignment in fallback: 70% alignment, 30% model
+                        f_score = (m_prob * 0.3) + (s_align * 0.7)
+                        
+                        if f_score > best_final_score:
+                            best_final_score = f_score
+                            best_label = lbl
+                            best_alignment_score = s_align
+                            best_definition = d_def
+
+                    if best_label:
+                        valid_tags = [{
+                            "label": best_label, 
+                            "score": round(best_final_score, 3),
+                            "explanation": {
+                                "definition": best_definition,
+                                "alignment_score": round(best_alignment_score, 3)
+                            }
+                        }]
+                    else:
+                        valid_tags = [] # Truly nothing matches
 
             results.append({"sentence": sentence_case(sentence), "tags": valid_tags[:2]})
 
