@@ -314,24 +314,22 @@ async def predict(request: AnalyzeRequest):
                                  # Compute overlap
                                  overlap = def_keys.intersection(sent_keywords)
                                  
-                                 # STRICTER RULE: If definition has 1 or more specific nouns (len>=1) and 0 match, penalize HARD.
-                                 # This forces "English" vs "Burmese" separation.
+                                 # Soft penalty for missing keywords (0.15), not a death sentence
+                                 # This handles cases where user says "I speak the local language" instead of "Burmese"
                                  if len(def_keys) >= 1 and len(overlap) == 0:
-                                     # Was 0.15, now 0.45 to kill the wrong language tag
-                                     penalty += 0.45
+                                     penalty += 0.15
 
-                             final_score = (model_prob * 0.4) + (alignment_score * 0.6) - penalty
+                             # Restore balanced weights: 60% Model, 40% Alignment
+                             # We trust the model's training more than the semantic scorer for nuance
+                             final_score = (model_prob * 0.6) + (alignment_score * 0.4) - penalty
                              final_score = max(0.0, final_score)
                     
                     # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
-                    # Increased strictness: < 0.35 alignment is likely garbage
-                    if definition and alignment_score < 0.35:
+                    # Relaxed strictness: < 0.25 is garbage
+                    if definition and alignment_score < 0.25:
                         continue
                     
-                    # STRICT VETO: If penalty is high (> 0.4), discard tag entirely.
-                    # This prevents penalized tags from winning just because other scores are low.
-                    if penalty > 0.35:
-                        continue
+                    # Removed strict veto > 0.35. Penalty just lowers score now.
 
                     if final_score >= thr:
                         valid_tags.append({
@@ -392,25 +390,24 @@ async def predict(request: AnalyzeRequest):
                             d_emb = CODEBOOK_EMBEDDINGS[lbl]
                             s_align = max(0.0, util.cos_sim(sent_emb, d_emb).item())
                             
-                            # Re-run strict checks for fallback candidates
+                            # Re-run soft checks for fallback candidates
                             def_keys = CODEBOOK_KEYWORDS.get(lbl, set())
                             if def_keys:
                                 overlap = def_keys.intersection(sent_keywords)
                                 if len(def_keys) >= 1 and len(overlap) == 0:
-                                    fallback_penalty = 0.45
+                                    fallback_penalty = 0.15
                             
                             # Sentiment check
                             def_sent = CODEBOOK_SENTIMENTS.get(lbl, 0.0)
                             if def_sent > 0.3 and sent_sentiment < -0.3:
-                                fallback_penalty += 0.4
+                                fallback_penalty += 0.2 # Softer penalty
                             elif def_sent < -0.3 and sent_sentiment > 0.3:
-                                fallback_penalty += 0.4
+                                fallback_penalty += 0.2
 
-                        if fallback_penalty > 0.35: continue
                         if s_align < 0.25: continue # Minimum alignment for fallback
 
-                        # Heavily weight alignment in fallback: 70% alignment, 30% model
-                        f_score = (m_prob * 0.3) + (s_align * 0.7)
+                        # Balanced weight in fallback
+                        f_score = (m_prob * 0.5) + (s_align * 0.5) - fallback_penalty
                         
                         if f_score > best_final_score:
                             best_final_score = f_score
