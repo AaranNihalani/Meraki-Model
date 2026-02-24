@@ -220,7 +220,7 @@ async def predict(request: AnalyzeRequest):
                     return cfg_id2label[idx]
             return f"LABEL_{idx}"
 
-        DEFAULT_THRESHOLD = 0.25
+        DEFAULT_THRESHOLD = 0.40
         HIGH_CONF_THRESHOLD = 0.65
 
         for i, sentence in enumerate(sentences):
@@ -230,7 +230,8 @@ async def predict(request: AnalyzeRequest):
 
             for label_id, score in enumerate(sent_probs):
                 label = resolve_label(label_id)
-                thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), HIGH_CONF_THRESHOLD)
+                # Use a slightly more aggressive base threshold
+                thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), 0.35)
                 
                 if score >= thr:
                     model_prob = float(score)
@@ -243,16 +244,22 @@ async def predict(request: AnalyzeRequest):
                              def_emb = CODEBOOK_EMBEDDINGS[label]
                              sim = util.cos_sim(sent_emb, def_emb).item()
                              alignment_score = max(0.0, sim)
-                             final_score = (model_prob * 0.7) + (alignment_score * 0.3)
+                             # Increase weight of semantic alignment to 50% to punish "hallucinations"
+                             final_score = (model_prob * 0.5) + (alignment_score * 0.5)
                     
-                    valid_tags.append({
-                        "label": label, 
-                        "score": round(final_score, 3),
-                        "explanation": {
-                            "definition": definition,
-                            "alignment_score": round(alignment_score, 3)
-                        }
-                    })
+                    # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
+                    if definition and alignment_score < 0.25:
+                        continue
+
+                    if final_score >= thr:
+                        valid_tags.append({
+                            "label": label, 
+                            "score": round(final_score, 3),
+                            "explanation": {
+                                "definition": definition,
+                                "alignment_score": round(alignment_score, 3)
+                            }
+                        })
 
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
 
@@ -261,6 +268,8 @@ async def predict(request: AnalyzeRequest):
                 best_id = int(_np.argmax(sent_probs))
                 best_label = resolve_label(best_id)
                 model_prob = float(sent_probs[best_id])
+                
+                # Check semantic alignment for the "best" statistical guess
                 final_score = model_prob
                 alignment_score = 0.0
                 definition = CODEBOOK.get(best_label)
@@ -269,8 +278,33 @@ async def predict(request: AnalyzeRequest):
                     def_emb = CODEBOOK_EMBEDDINGS[best_label]
                     sim = util.cos_sim(sent_emb, def_emb).item()
                     alignment_score = max(0.0, sim)
-                    final_score = (model_prob * 0.7) + (alignment_score * 0.3)
+                    # Use balanced weight
+                    final_score = (model_prob * 0.5) + (alignment_score * 0.5)
                 
+                # If the best guess is still trash semantically, don't return it blindly.
+                # Instead, search for the best SEMANTIC match among top 5 probabilities
+                if alignment_score < 0.2:
+                    top_indices = _np.argsort(sent_probs)[-5:]
+                    best_alt_label = None
+                    best_alt_score = -1.0
+                    
+                    for idx in top_indices:
+                        lbl = resolve_label(int(idx))
+                        if lbl in CODEBOOK_EMBEDDINGS and sent_emb is not None:
+                            d_emb = CODEBOOK_EMBEDDINGS[lbl]
+                            s_sim = util.cos_sim(sent_emb, d_emb).item()
+                            if s_sim > best_alt_score and s_sim > 0.3: # Minimum alignment
+                                best_alt_score = s_sim
+                                best_alt_label = lbl
+                                
+                    if best_alt_label:
+                        best_label = best_alt_label
+                        definition = CODEBOOK.get(best_label)
+                        alignment_score = best_alt_score
+                        # Recalculate final score for this alternative
+                        m_prob = float(sent_probs[int(idx)]) # Approximate
+                        final_score = (m_prob * 0.4) + (alignment_score * 0.6)
+
                 valid_tags = [{
                     "label": best_label, 
                     "score": round(final_score, 3),
