@@ -258,7 +258,7 @@ async def predict(request: AnalyzeRequest):
                              sim = util.cos_sim(sent_emb, def_emb).item()
                              alignment_score = max(0.0, sim)
                              # Increase weight of semantic alignment to 60% to heavily punish "hallucinations"
-                        final_score = (model_prob * 0.4) + (alignment_score * 0.6)
+                             final_score = (model_prob * 0.4) + (alignment_score * 0.6)
                     
                     # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
                     # Increased strictness: < 0.35 alignment is likely garbage
