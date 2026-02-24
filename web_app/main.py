@@ -94,11 +94,20 @@ sia = SentimentIntensityAnalyzer()
 def extract_keywords(text):
     """Extract Nouns/Proper Nouns from text."""
     try:
+        # Pre-process: remove punctuation except hyphens/apostrophes
+        import string
+        text = text.translate(str.maketrans('', '', string.punctuation.replace('-', '')))
+        
         tokens = word_tokenize(text)
         tags = pos_tag(tokens)
-        # NNP: Proper Noun Sing, NN: Noun Sing, NNS: Noun Plural, NNPS: Proper Noun Plural
-        keywords = {word.lower() for word, tag in tags if tag in ('NN', 'NNS', 'NNP', 'NNPS')}
-        # Filter out common stopwords if needed, but for now relying on POS is decent
+        
+        keywords = set()
+        for word, tag in tags:
+            # Keep Nouns (NN*), Adjectives (JJ*) and Foreign Words (FW)
+            # Adjectives are crucial for languages (e.g. "Burmese" is often JJ)
+            if tag.startswith(('NN', 'JJ', 'FW')) and len(word) > 2:
+                keywords.add(word.lower())
+                
         return keywords
     except:
         return set()
@@ -123,16 +132,36 @@ def load_codebook():
                     CODEBOOK_EMBEDDINGS = {label: emb for label, emb in zip(labels, embeddings)}
                     print("✅ Precomputed codebook embeddings.")
             
-            # Precompute Sentiments and Keywords
-            CODEBOOK_SENTIMENTS = {}
-            CODEBOOK_KEYWORDS = {}
-            for label, definition in CODEBOOK.items():
-                if isinstance(definition, str):
-                    # Sentiment: compound score (-1 to 1)
-                    CODEBOOK_SENTIMENTS[label] = sia.polarity_scores(definition)['compound']
-                    # Keywords
-                    CODEBOOK_KEYWORDS[label] = extract_keywords(definition)
-            print("✅ Precomputed sentiments and keywords.")
+                    # Precompute Sentiments and Keywords
+                    CODEBOOK_SENTIMENTS = {}
+                    CODEBOOK_KEYWORDS = {}
+                    
+                    # Compute TF-IDF to find important words dynamically
+                    from sklearn.feature_extraction.text import TfidfVectorizer
+                    
+                    if definitions:
+                        # Use sklearn to find top keywords per definition relative to the whole codebook
+                        vectorizer = TfidfVectorizer(stop_words='english', use_idf=True)
+                        tfidf_matrix = vectorizer.fit_transform(definitions)
+                        feature_names = vectorizer.get_feature_names_out()
+                        
+                        for idx, (label, definition) in enumerate(CODEBOOK.items()):
+                            if isinstance(definition, str):
+                                # Sentiment
+                                CODEBOOK_SENTIMENTS[label] = sia.polarity_scores(definition)['compound']
+                                
+                                # Keywords: Get top 3 words with highest TF-IDF score for this definition
+                                row = tfidf_matrix[idx]
+                                top_n = 3
+                                # Sort indices by score descending
+                                sorted_indices = row.toarray().flatten().argsort()[::-1]
+                                top_indices = sorted_indices[:top_n]
+                                
+                                # Keep only words with non-zero score
+                                keys = {feature_names[i] for i in top_indices if row[0, i] > 0}
+                                CODEBOOK_KEYWORDS[label] = keys
+                                
+                    print("✅ Precomputed sentiments and keywords (TF-IDF).")
 
         else:
             print("⚠️ Codebook not found at path.")
