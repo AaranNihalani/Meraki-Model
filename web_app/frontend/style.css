@@ -358,6 +358,33 @@ thead th {
     color: white;
 }
 
+#codebookViewer {
+    margin-top: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: #fff;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.codebook-table-container table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.codebook-table-container th {
+    background: #f8fafc;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.codebook-table-container td {
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+}
+
 /* Tooltip / Explanation */
 .tag-explanation {
     display: none;

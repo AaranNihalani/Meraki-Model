@@ -34,6 +34,7 @@
                     <input type="file" id="fileInput" accept=".txt,.docx,.pdf" style="display:none">
                     <button id="clearBtn" onclick="clearText()" class="secondary">Clear</button>
                     <button id="tableBtn" onclick="renderTable()" class="secondary">Table View</button>
+                    <button id="downloadResultsBtn" onclick="downloadResults()" class="secondary hidden">Download CSV</button>
                 </div>
             </div>
 
@@ -69,15 +70,35 @@
             <div class="codebook-section">
                 <h3>Codebook Management</h3>
                 <div class="codebook-actions">
+                    <button id="viewCodebookBtn" onclick="toggleCodebookView()" class="secondary">
+                        View Codebook
+                    </button>
                     <button id="uploadCodebookBtn" onclick="selectCodebookFile()">
                         Upload Codebook
                     </button>
                     <input type="file" id="codebookInput" accept=".json,.csv,.xlsx" style="display:none">
                     <a href="/api/codebook/download" id="downloadCodebookBtn" class="secondary" download>
-                        Download Current Codebook
+                        Download JSON
                     </a>
                 </div>
                 <div id="codebookMsg" class="hidden"></div>
+                
+                <!-- Codebook Viewer Table -->
+                <div id="codebookViewer" class="hidden">
+                    <div class="codebook-table-container">
+                        <table id="codebookTable">
+                            <thead>
+                                <tr>
+                                    <th>Label</th>
+                                    <th>Definition</th>
+                                </tr>
+                            </thead>
+                            <tbody id="codebookTbody">
+                                <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </main>
 

@@ -257,11 +257,12 @@ async def predict(request: AnalyzeRequest):
                              def_emb = CODEBOOK_EMBEDDINGS[label]
                              sim = util.cos_sim(sent_emb, def_emb).item()
                              alignment_score = max(0.0, sim)
-                             # Increase weight of semantic alignment to 50% to punish "hallucinations"
-                             final_score = (model_prob * 0.5) + (alignment_score * 0.5)
+                             # Increase weight of semantic alignment to 60% to heavily punish "hallucinations"
+                        final_score = (model_prob * 0.4) + (alignment_score * 0.6)
                     
                     # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
-                    if definition and alignment_score < 0.25:
+                    # Increased strictness: < 0.35 alignment is likely garbage
+                    if definition and alignment_score < 0.35:
                         continue
 
                     if final_score >= thr:
@@ -277,53 +278,44 @@ async def predict(request: AnalyzeRequest):
             valid_tags.sort(key=lambda x: x["score"], reverse=True)
 
             if not valid_tags:
+                # Fallback Logic: If no tags passed the strict filter
                 import numpy as _np
-                best_id = int(_np.argmax(sent_probs))
-                best_label = resolve_label(best_id)
-                model_prob = float(sent_probs[best_id])
-                
-                # Check semantic alignment for the "best" statistical guess
-                final_score = model_prob
-                alignment_score = 0.0
-                definition = CODEBOOK.get(best_label)
-                
-                if definition and sent_emb is not None and best_label in CODEBOOK_EMBEDDINGS:
-                    def_emb = CODEBOOK_EMBEDDINGS[best_label]
-                    sim = util.cos_sim(sent_emb, def_emb).item()
-                    alignment_score = max(0.0, sim)
-                    # Use balanced weight
-                    final_score = (model_prob * 0.5) + (alignment_score * 0.5)
-                
-                # If the best guess is still trash semantically, don't return it blindly.
-                # Instead, search for the best SEMANTIC match among top 5 probabilities
-                if alignment_score < 0.2:
-                    top_indices = _np.argsort(sent_probs)[-5:]
-                    best_alt_label = None
-                    best_alt_score = -1.0
+                top_indices = _np.argsort(sent_probs)[-10:] # Look deeper, top 10
+                best_label = None
+                best_final_score = -1.0
+                best_alignment_score = 0.0
+                best_definition = None
+
+                for idx in top_indices:
+                    idx = int(idx)
+                    lbl = resolve_label(idx)
+                    m_prob = float(sent_probs[idx])
                     
-                    for idx in top_indices:
-                        lbl = resolve_label(int(idx))
-                        if lbl in CODEBOOK_EMBEDDINGS and sent_emb is not None:
-                            d_emb = CODEBOOK_EMBEDDINGS[lbl]
-                            s_sim = util.cos_sim(sent_emb, d_emb).item()
-                            if s_sim > best_alt_score and s_sim > 0.3: # Minimum alignment
-                                best_alt_score = s_sim
-                                best_alt_label = lbl
-                                
-                    if best_alt_label:
-                        best_label = best_alt_label
-                        definition = CODEBOOK.get(best_label)
-                        alignment_score = best_alt_score
-                        # Recalculate final score for this alternative
-                        m_prob = float(sent_probs[int(idx)]) # Approximate
-                        final_score = (m_prob * 0.4) + (alignment_score * 0.6)
+                    # Skip if model thinks it's trash (<10%) unless alignment is amazing
+                    if m_prob < 0.10: continue
+
+                    d_def = CODEBOOK.get(lbl)
+                    s_align = 0.0
+                    
+                    if d_def and sent_emb is not None and lbl in CODEBOOK_EMBEDDINGS:
+                        d_emb = CODEBOOK_EMBEDDINGS[lbl]
+                        s_align = max(0.0, util.cos_sim(sent_emb, d_emb).item())
+                    
+                    # Heavily weight alignment in fallback: 70% alignment, 30% model
+                    f_score = (m_prob * 0.3) + (s_align * 0.7)
+                    
+                    if f_score > best_final_score:
+                        best_final_score = f_score
+                        best_label = lbl
+                        best_alignment_score = s_align
+                        best_definition = d_def
 
                 valid_tags = [{
                     "label": best_label, 
-                    "score": round(final_score, 3),
+                    "score": round(best_final_score, 3),
                     "explanation": {
-                        "definition": definition,
-                        "alignment_score": round(alignment_score, 3)
+                        "definition": best_definition,
+                        "alignment_score": round(best_alignment_score, 3)
                     }
                 }]
 

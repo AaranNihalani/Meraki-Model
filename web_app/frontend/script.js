@@ -15,6 +15,11 @@ const codebookInput = document.getElementById('codebookInput');
 const uploadCodebookBtn = document.getElementById('uploadCodebookBtn');
 const codebookMsg = document.getElementById('codebookMsg');
 
+const downloadResultsBtn = document.getElementById('downloadResultsBtn');
+const codebookViewer = document.getElementById('codebookViewer');
+const codebookTbody = document.getElementById('codebookTbody');
+const viewCodebookBtn = document.getElementById('viewCodebookBtn');
+
 let lastResults = null;
 
 async function analyzeText() {
@@ -26,6 +31,7 @@ async function analyzeText() {
     showError(null);
     resultsSection.classList.add('hidden');
     resultsList.innerHTML = '';
+    downloadResultsBtn.classList.add('hidden');
 
     try {
         const response = await fetch(API_URL, {
@@ -104,6 +110,7 @@ function renderResults(results) {
     });
 
     resultsSection.classList.remove('hidden');
+    downloadResultsBtn.classList.remove('hidden');
     
     // Smooth scroll to results
     resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -171,6 +178,79 @@ fileInput.addEventListener('change', () => {
         uploadFile();
     }
 });
+
+function downloadResults() {
+    if (!lastResults || lastResults.length === 0) return;
+
+    // Convert to CSV
+    const headers = ['Sentence', 'Tags', 'Scores', 'Explanations'];
+    const rows = lastResults.map(item => {
+        const sentence = `"${item.sentence.replace(/"/g, '""')}"`;
+        const tags = `"${item.tags.map(t => t.label).join('; ')}"`;
+        const scores = `"${item.tags.map(t => Math.round(t.score * 100) + '%').join('; ')}"`;
+        const explanations = `"${item.tags.map(t => (t.explanation && t.explanation.definition) ? t.explanation.definition : '').join('; ')}"`;
+        return [sentence, tags, scores, explanations].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `meraki_results_${new Date().toISOString().slice(0,10)}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+let isCodebookVisible = false;
+
+async function toggleCodebookView() {
+    isCodebookVisible = !isCodebookVisible;
+    
+    if (isCodebookVisible) {
+        viewCodebookBtn.textContent = 'Hide Codebook';
+        codebookViewer.classList.remove('hidden');
+        
+        // Fetch and render codebook if empty
+        if (codebookTbody.children.length === 0) {
+            try {
+                const resp = await fetch('/api/codebook/download');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    renderCodebookTable(data);
+                }
+            } catch (e) {
+                console.error("Failed to load codebook", e);
+            }
+        }
+    } else {
+        viewCodebookBtn.textContent = 'View Codebook';
+        codebookViewer.classList.add('hidden');
+    }
+}
+
+function renderCodebookTable(data) {
+    codebookTbody.innerHTML = '';
+    // Sort keys alphabetically
+    const keys = Object.keys(data).sort();
+    
+    keys.forEach(key => {
+        const tr = document.createElement('tr');
+        const tdLabel = document.createElement('td');
+        tdLabel.textContent = key;
+        tdLabel.style.fontWeight = '600';
+        
+        const tdDef = document.createElement('td');
+        tdDef.textContent = data[key];
+        
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdDef);
+        codebookTbody.appendChild(tr);
+    });
+}
 
 function selectCodebookFile() {
     codebookInput.click();
