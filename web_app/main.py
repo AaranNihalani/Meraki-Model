@@ -192,39 +192,79 @@ def sentence_case(s):
     s = s.strip()
     return (s[:1].upper() + s[1:]) if s else s
 
+def _table_to_codebook(df: pd.DataFrame):
+    if df is None or df.empty:
+        raise HTTPException(status_code=400, detail="Codebook file is empty.")
+    df = df.dropna(how="all")
+    if df.shape[1] < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Codebook must have at least 2 columns (label, definition). Found {df.shape[1]} column(s).",
+        )
+    norm = {str(c).strip().lower(): c for c in df.columns}
+    label_col = None
+    def_col = None
+    for cand in ("label", "tag", "code", "name"):
+        if cand in norm:
+            label_col = norm[cand]
+            break
+    for cand in ("definition", "description", "def", "meaning"):
+        if cand in norm:
+            def_col = norm[cand]
+            break
+    if label_col is None or def_col is None:
+        label_col = df.columns[0]
+        def_col = df.columns[1]
+    out = {}
+    for _, row in df.iterrows():
+        lbl = row.get(label_col)
+        dfn = row.get(def_col)
+        if pd.isna(lbl) or pd.isna(dfn):
+            continue
+        lbl = str(lbl).strip()
+        dfn = str(dfn).strip()
+        if not lbl or not dfn:
+            continue
+        out[lbl] = dfn
+    if not out:
+        raise HTTPException(status_code=400, detail="No valid (label, definition) rows found in codebook.")
+    return out
+
 @app.post("/api/codebook")
 async def update_codebook(file: UploadFile = File(...)):
     global CODEBOOK, CODEBOOK_EMBEDDINGS
     
-    filename = file.filename.lower()
+    filename = (file.filename or "").lower()
     content = await file.read()
     new_data = {}
     
     try:
         if filename.endswith(".json"):
-            new_data = json.loads(content)
+            parsed = json.loads(content.decode("utf-8", errors="ignore"))
+            if isinstance(parsed, dict):
+                new_data = {
+                    str(k).strip(): (str(v).strip() if v is not None else "")
+                    for k, v in parsed.items()
+                    if str(k).strip() and (str(v).strip() if v is not None else "")
+                }
+            else:
+                raise HTTPException(status_code=400, detail="JSON codebook must be an object: {label: definition}.")
         elif filename.endswith(".csv"):
             try:
-                df = pd.read_csv(io.BytesIO(content))
+                df = pd.read_csv(io.BytesIO(content), sep=None, engine="python")
             except:
-                # Try different encoding or delimiter
-                df = pd.read_csv(io.BytesIO(content), encoding="ISO-8859-1")
-                
-            if "Label" in df.columns and "Definition" in df.columns:
-                new_data = dict(zip(df["Label"], df["Definition"]))
-            else:
-                new_data = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
+                df = pd.read_csv(io.BytesIO(content), encoding="ISO-8859-1", sep=None, engine="python")
+            new_data = _table_to_codebook(df)
         elif filename.endswith((".xls", ".xlsx")):
             df = pd.read_excel(io.BytesIO(content))
-            if "Label" in df.columns and "Definition" in df.columns:
-                new_data = dict(zip(df["Label"], df["Definition"]))
-            else:
-                new_data = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
+            new_data = _table_to_codebook(df)
         else:
              raise HTTPException(status_code=400, detail="Unsupported file format. Use JSON, CSV, or Excel.")
              
-        # Update CODEBOOK
-        CODEBOOK.update(new_data)
+        if not new_data:
+            raise HTTPException(status_code=400, detail="Parsed codebook contains no entries.")
+
+        CODEBOOK = dict(new_data)
         
         # Save to file
         with open(CODEBOOK_PATH, "w") as f:
@@ -235,6 +275,8 @@ async def update_codebook(file: UploadFile = File(...)):
         
         return {"message": "Codebook updated successfully", "total_entries": len(CODEBOOK)}
         
+    except HTTPException as e:
+        raise e
     except Exception as e:
         print(f"Update Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update codebook: {str(e)}")

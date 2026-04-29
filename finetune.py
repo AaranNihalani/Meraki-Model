@@ -5,10 +5,10 @@ import torch
 from torch.utils.data import Dataset
 import torch.nn as nn
 from transformers import (
-    AutoTokenizer,
     AutoModelForSequenceClassification,
     TrainingArguments,
-    Trainer
+    Trainer,
+    DebertaV2Tokenizer,
 )
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
@@ -52,7 +52,7 @@ print(f"🔎 Example classes: {mlb.classes_[:10]}")
 # --------------------------
 if not os.path.exists(MODEL_NAME):
     MODEL_NAME = "microsoft/deberta-v3-large"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+tokenizer = DebertaV2Tokenizer.from_pretrained(MODEL_NAME)
 
 # Mistral models need a padding token
 if tokenizer.pad_token is None:

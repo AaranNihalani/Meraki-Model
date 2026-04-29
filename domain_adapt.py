@@ -1,11 +1,11 @@
 import os, re, glob, torch
 from datasets import Dataset
 from transformers import (
-    AutoTokenizer,
     AutoModelForMaskedLM,
     DataCollatorForLanguageModeling,
     TrainingArguments,
     Trainer,
+    DebertaV2Tokenizer,
 )
 
 # ============================================================
@@ -59,7 +59,7 @@ else:
 
 if len(corpus) > 0:
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tokenizer = DebertaV2Tokenizer.from_pretrained(BASE_MODEL)
 
     dataset = Dataset.from_list(corpus)
 
@@ -137,7 +137,7 @@ if len(corpus) > 0:
     model.save_pretrained("./models/domain_adapted")
 
     # 🔥 Save *fresh* tokenizer from DeBERTa base — prevents corruption
-    AutoTokenizer.from_pretrained(BASE_MODEL).save_pretrained("./models/domain_adapted")
+    DebertaV2Tokenizer.from_pretrained(BASE_MODEL).save_pretrained("./models/domain_adapted")
 
     print("✅ Domain adaptation complete!")
     print("📦 Saved to ./models/domain_adapted")
