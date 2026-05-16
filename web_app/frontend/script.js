@@ -1,4 +1,5 @@
 const API_URL = "/api/predict";
+const API_STREAM_URL = "/api/predict_stream";
 
 const inputText = document.getElementById('inputText');
 const analyzeBtn = document.getElementById('analyzeBtn');
@@ -32,28 +33,141 @@ async function analyzeText() {
     resultsSection.classList.add('hidden');
     resultsList.innerHTML = '';
     downloadResultsBtn.classList.add('hidden');
+    lastResults = [];
+    sentenceCount.textContent = '';
 
     try {
-        const response = await fetch(API_URL, {
+        const response = await fetch(API_STREAM_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text })
         });
 
         if (!response.ok) {
-            const errData = await response.json();
+            const errData = await response.json().catch(() => ({}));
             throw new Error(errData.detail || 'Analysis failed. Please try again.');
         }
 
-        const data = await response.json();
-        lastResults = data.results;
-        renderResults(lastResults);
+        if (!response.body) {
+            const data = await response.json();
+            lastResults = data.results || [];
+            renderResults(lastResults);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let total = null;
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop() || '';
+
+            for (const part of parts) {
+                const line = part.split('\n').find(l => l.startsWith('data: '));
+                if (!line) continue;
+                const payloadStr = line.slice(6).trim();
+                if (!payloadStr) continue;
+
+                let payload;
+                try {
+                    payload = JSON.parse(payloadStr);
+                } catch {
+                    continue;
+                }
+
+                if (payload.type === 'meta') {
+                    total = payload.total;
+                    sentenceCount.textContent = `0 / ${total} Sentences`;
+                    continue;
+                }
+
+                if (payload.type === 'result' && payload.result) {
+                    lastResults.push(payload.result);
+                    renderSingleResult(payload.result);
+                    resultsSection.classList.remove('hidden');
+                    const shown = lastResults.length;
+                    if (total !== null) {
+                        sentenceCount.textContent = `${shown} / ${total} Sentences`;
+                    } else {
+                        sentenceCount.textContent = `${shown} Sentence${shown !== 1 ? 's' : ''}`;
+                    }
+                    continue;
+                }
+
+                if (payload.type === 'warning' && payload.detail) {
+                    showError(payload.detail);
+                    continue;
+                }
+
+                if (payload.type === 'error' && payload.detail) {
+                    throw new Error(payload.detail);
+                }
+
+                if (payload.type === 'done') {
+                    downloadResultsBtn.classList.remove('hidden');
+                }
+            }
+        }
 
     } catch (err) {
         showError(err.message);
     } finally {
         setLoading(false);
     }
+}
+
+function renderSingleResult(item) {
+    const card = document.createElement('div');
+    card.className = 'result-card';
+
+    const sentenceDiv = document.createElement('div');
+    sentenceDiv.className = 'sentence-text';
+    sentenceDiv.textContent = item.sentence;
+
+    const tagsDiv = document.createElement('div');
+    tagsDiv.className = 'tags-row';
+
+    if (item.tags.length > 0) {
+        item.tags.forEach(tag => {
+            const tagSpan = document.createElement('span');
+            const isHighConf = tag.score >= 0.7;
+            const isLowConf = tag.score < 0.7;
+            tagSpan.className = `tag ${isHighConf ? 'high-conf' : ''} ${isLowConf ? 'low-conf' : ''}`;
+
+            let explanationText = '';
+            if (tag.explanation) {
+                const penaltyMsg = tag.explanation.sentiment_penalty > 0
+                    ? `<br><span class="penalty-text">⚠️ Penalty: -${(tag.explanation.sentiment_penalty * 100).toFixed(0)}% (Mismatch)</span>`
+                    : '';
+                explanationText = `
+                    <div class="tag-explanation">
+                        <strong>${tag.label}</strong><br>
+                        Definition: ${tag.explanation.definition || 'N/A'}<br>
+                        Alignment: ${tag.explanation.alignment_score ? (tag.explanation.alignment_score * 100).toFixed(1) + '%' : 'N/A'}
+                        ${penaltyMsg}
+                    </div>
+                `;
+            }
+
+            tagSpan.innerHTML = `${tag.label} <span class="tag-score">${Math.round(tag.score * 100)}%</span>${explanationText}`;
+            tagsDiv.appendChild(tagSpan);
+        });
+    } else {
+        const noTag = document.createElement('span');
+        noTag.className = 'no-tags';
+        noTag.textContent = 'No tags detected';
+        tagsDiv.appendChild(noTag);
+    }
+
+    card.appendChild(sentenceDiv);
+    card.appendChild(tagsDiv);
+    resultsList.appendChild(card);
 }
 
 function renderResults(results) {
@@ -326,7 +440,10 @@ function renderTable() {
             // Format explanations
             const explanations = item.tags.map(t => {
                 if (t.explanation) {
-                    return `<strong>${t.label}</strong>: ${t.explanation.definition || ''} (Align: ${(t.explanation.alignment_score * 100).toFixed(0)}%)`;
+                    const alignVal = (typeof t.explanation.alignment_score === 'number')
+                        ? `${(t.explanation.alignment_score * 100).toFixed(0)}%`
+                        : 'N/A';
+                    return `<strong>${t.label}</strong>: ${t.explanation.definition || ''} (Align: ${alignVal})`;
                 }
                 return `<strong>${t.label}</strong>: No explanation`;
             });

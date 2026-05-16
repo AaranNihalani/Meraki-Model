@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import nltk
 import torch
 import numpy as np
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import io
@@ -184,9 +186,40 @@ class AnalyzeRequest(BaseModel):
 def normalize_text(text):
     return " ".join([l.strip() for l in text.split("\n") if l.strip()])
 
+def extract_answer_text(text: str) -> str:
+    if not text:
+        return ""
+    parts = text.split("Answer:")
+    if len(parts) > 1:
+        answers = []
+        for p in parts[1:]:
+            p = p.strip()
+            p = re.sub(r"^\[\d{1,2}:\d{2}\]\s*", "", p)
+            p = re.sub(r"^\d{1,2}:\d{2}\s*", "", p)
+            answers.append(p)
+        text = "\n".join(answers)
+    text = re.sub(r"\[prompt\]", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[\d{1,2}:\d{2}\]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 def split_on_full_stop(text):
-    parts = [p.strip() for p in text.split('.')]
-    return [p for p in parts if p]
+    try:
+        sents = nltk.sent_tokenize(text)
+    except Exception:
+        parts = [p.strip() for p in text.split('.')]
+        sents = [p for p in parts if p]
+    out = []
+    seen = set()
+    for s in sents:
+        s = s.strip()
+        if len(s) < 3:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 def sentence_case(s):
     s = s.strip()
@@ -347,7 +380,8 @@ async def predict(request: AnalyzeRequest):
         return {"results": []}
 
     # 1. Split sentences
-    clean_text = normalize_text(raw_text)
+    clean_text = extract_answer_text(raw_text)
+    clean_text = normalize_text(clean_text)
     sentences = split_on_full_stop(clean_text)
 
     results = []
@@ -384,8 +418,7 @@ async def predict(request: AnalyzeRequest):
                     return cfg_id2label[idx]
             return f"LABEL_{idx}"
 
-        DEFAULT_THRESHOLD = 0.40
-        HIGH_CONF_THRESHOLD = 0.65
+        DEFAULT_THRESHOLD = 0.55
 
         for i, sentence in enumerate(sentences):
             sent_probs = probs[i]
@@ -398,8 +431,7 @@ async def predict(request: AnalyzeRequest):
 
             for label_id, score in enumerate(sent_probs):
                 label = resolve_label(label_id)
-                # Use a slightly more aggressive base threshold
-                thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), 0.35)
+                thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), DEFAULT_THRESHOLD)
                 
                 if score >= thr:
                     model_prob = float(score)
@@ -409,55 +441,44 @@ async def predict(request: AnalyzeRequest):
                     
                     penalty = 0.0
 
-                    if definition and sent_emb is not None:
-                         if label in CODEBOOK_EMBEDDINGS:
-                             def_emb = CODEBOOK_EMBEDDINGS[label]
-                             sim = util.cos_sim(sent_emb, def_emb).item()
-                             alignment_score = max(0.0, sim)
+                    has_alignment = bool(definition) and (sent_emb is not None) and (label in CODEBOOK_EMBEDDINGS)
+                    if has_alignment:
+                        def_emb = CODEBOOK_EMBEDDINGS[label]
+                        sim = util.cos_sim(sent_emb, def_emb).item()
+                        alignment_score = max(0.0, sim)
                              
-                             # --- Sentiment Check ---
-                             # If definition is strongly positive (>0.3) and sentence is strongly negative (<-0.3), penalize
-                             def_sent = CODEBOOK_SENTIMENTS.get(label, 0.0)
-                             if def_sent > 0.3 and sent_sentiment < -0.3:
-                                 penalty += 0.4 # Heavy penalty for polarity mismatch
-                             elif def_sent < -0.3 and sent_sentiment > 0.3:
-                                 penalty += 0.4
+                        def_sent = CODEBOOK_SENTIMENTS.get(label, 0.0)
+                        if def_sent > 0.3 and sent_sentiment < -0.3:
+                            penalty += 0.4
+                        elif def_sent < -0.3 and sent_sentiment > 0.3:
+                            penalty += 0.4
 
-                             # --- Keyword Overlap Check ---
-                             # If definition has unique keywords (like "Burmese", "English"), check overlap
-                             def_keys = CODEBOOK_KEYWORDS.get(label, set())
+                        def_keys = CODEBOOK_KEYWORDS.get(label, set())
                              
-                             if def_keys:
-                                 # Compute overlap
-                                 overlap = def_keys.intersection(sent_keywords)
+                        if def_keys:
+                            overlap = def_keys.intersection(sent_keywords)
                                  
-                                 # Soft penalty for missing keywords (0.15), not a death sentence
-                                 # This handles cases where user says "I speak the local language" instead of "Burmese"
-                                 if len(def_keys) >= 1 and len(overlap) == 0:
-                                     penalty += 0.15
+                            if len(def_keys) >= 1 and len(overlap) == 0:
+                                penalty += 0.15
 
-                             # Restore balanced weights: 60% Model, 40% Alignment
-                             # We trust the model's training more than the semantic scorer for nuance
-                             final_score = (model_prob * 0.6) + (alignment_score * 0.4) - penalty
-                             final_score = max(0.0, final_score)
+                        final_score = (model_prob * 0.6) + (alignment_score * 0.4) - penalty
+                        final_score = max(0.0, final_score)
                     
-                    # Filter out if alignment is terrible (e.g. model confident but meaning is totally wrong)
-                    # Relaxed strictness: < 0.25 is garbage
-                    if definition and alignment_score < 0.25:
+                    if has_alignment and alignment_score < 0.25:
                         continue
                     
-                    # Removed strict veto > 0.35. Penalty just lowers score now.
-
                     if final_score >= thr:
-                        valid_tags.append({
+                        tag_obj = {
                             "label": label, 
                             "score": round(final_score, 3),
-                            "explanation": {
+                        }
+                        if has_alignment:
+                            tag_obj["explanation"] = {
                                 "definition": definition,
                                 "alignment_score": round(alignment_score, 3),
                                 "sentiment_penalty": penalty
                             }
-                        })
+                        valid_tags.append(tag_obj)
 
             # --- Post-Processing: Conflict Resolution ---
             # If multiple tags from same "family" exist (e.g. "Skills Learned: ..."), keep only the winner.
@@ -481,68 +502,6 @@ async def predict(request: AnalyzeRequest):
             valid_tags = final_filtered_tags
             
             # --- End Post-Processing ---
-
-            if not valid_tags:
-                    # Fallback Logic: If no tags passed the strict filter
-                    import numpy as _np
-                    top_indices = _np.argsort(sent_probs)[-10:] # Look deeper, top 10
-                    best_label = None
-                    best_final_score = -1.0
-                    best_alignment_score = 0.0
-                    best_definition = None
-
-                    for idx in top_indices:
-                        idx = int(idx)
-                        lbl = resolve_label(idx)
-                        m_prob = float(sent_probs[idx])
-                        
-                        # Skip if model thinks it's trash (<10%) unless alignment is amazing
-                        if m_prob < 0.10: continue
-
-                        d_def = CODEBOOK.get(lbl)
-                        s_align = 0.0
-                        fallback_penalty = 0.0
-                        
-                        if d_def and sent_emb is not None and lbl in CODEBOOK_EMBEDDINGS:
-                            d_emb = CODEBOOK_EMBEDDINGS[lbl]
-                            s_align = max(0.0, util.cos_sim(sent_emb, d_emb).item())
-                            
-                            # Re-run soft checks for fallback candidates
-                            def_keys = CODEBOOK_KEYWORDS.get(lbl, set())
-                            if def_keys:
-                                overlap = def_keys.intersection(sent_keywords)
-                                if len(def_keys) >= 1 and len(overlap) == 0:
-                                    fallback_penalty = 0.15
-                            
-                            # Sentiment check
-                            def_sent = CODEBOOK_SENTIMENTS.get(lbl, 0.0)
-                            if def_sent > 0.3 and sent_sentiment < -0.3:
-                                fallback_penalty += 0.2 # Softer penalty
-                            elif def_sent < -0.3 and sent_sentiment > 0.3:
-                                fallback_penalty += 0.2
-
-                        if s_align < 0.25: continue # Minimum alignment for fallback
-
-                        # Balanced weight in fallback
-                        f_score = (m_prob * 0.5) + (s_align * 0.5) - fallback_penalty
-                        
-                        if f_score > best_final_score:
-                            best_final_score = f_score
-                            best_label = lbl
-                            best_alignment_score = s_align
-                            best_definition = d_def
-
-                    if best_label:
-                        valid_tags = [{
-                            "label": best_label, 
-                            "score": round(best_final_score, 3),
-                            "explanation": {
-                                "definition": best_definition,
-                                "alignment_score": round(best_alignment_score, 3)
-                            }
-                        }]
-                    else:
-                        valid_tags = [] # Truly nothing matches
 
             results.append({"sentence": sentence_case(sentence), "tags": valid_tags[:2]})
 
@@ -574,6 +533,159 @@ async def predict(request: AnalyzeRequest):
         print(f"Supabase write failed: {e}")
 
     return {"results": results}
+
+@app.post("/api/predict_stream")
+async def predict_stream(request: AnalyzeRequest):
+    raw_text = request.text.strip()
+    if not raw_text:
+        async def empty_gen():
+            yield f"data: {json.dumps({'type': 'meta', 'total': 0})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'total': 0})}\n\n"
+        return StreamingResponse(empty_gen(), media_type="text/event-stream")
+
+    clean_text = extract_answer_text(raw_text)
+    clean_text = normalize_text(clean_text)
+    sentences = split_on_full_stop(clean_text)
+
+    async def event_gen():
+        yield f"data: {json.dumps({'type': 'meta', 'total': len(sentences)})}\n\n"
+
+        cfg_id2label = getattr(model.config, "id2label", None)
+
+        def resolve_label(idx):
+            if LOCAL_ID2LABEL:
+                return LOCAL_ID2LABEL.get(str(idx)) or LOCAL_ID2LABEL.get(idx)
+            if isinstance(cfg_id2label, dict):
+                return cfg_id2label.get(idx) or cfg_id2label.get(str(idx))
+            if isinstance(cfg_id2label, list):
+                if 0 <= idx < len(cfg_id2label):
+                    return cfg_id2label[idx]
+            return f"LABEL_{idx}"
+
+        DEFAULT_THRESHOLD = 0.55
+        batch_size = 4
+        emitted = 0
+        results = []
+
+        for start in range(0, len(sentences), batch_size):
+            batch_sents = sentences[start:start + batch_size]
+            try:
+                inputs = tokenizer(batch_sents, return_tensors="pt", padding=True, truncation=True, max_length=384)
+                with torch.no_grad():
+                    logits = model(**inputs).logits
+                    probs = torch.sigmoid(logits).cpu().numpy()
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'detail': f'Model inference failed: {str(e)}'})}\n\n"
+                return
+
+            sent_embeddings = None
+            if st_model:
+                try:
+                    sent_embeddings = st_model.encode(batch_sents, convert_to_tensor=True)
+                except Exception:
+                    sent_embeddings = None
+
+            for i, sentence in enumerate(batch_sents):
+                sent_probs = probs[i]
+                sent_emb = sent_embeddings[i] if sent_embeddings is not None else None
+                valid_tags = []
+
+                sent_sentiment = sia.polarity_scores(sentence)['compound']
+                sent_keywords = extract_keywords(sentence)
+
+                for label_id, score in enumerate(sent_probs):
+                    label = resolve_label(label_id)
+                    thr = max(THRESHOLDS.get(label, DEFAULT_THRESHOLD), DEFAULT_THRESHOLD)
+
+                    if score >= thr:
+                        model_prob = float(score)
+                        final_score = model_prob
+                        alignment_score = 0.0
+                        definition = CODEBOOK.get(label)
+                        penalty = 0.0
+
+                        has_alignment = bool(definition) and (sent_emb is not None) and (label in CODEBOOK_EMBEDDINGS)
+                        if has_alignment:
+                            def_emb = CODEBOOK_EMBEDDINGS[label]
+                            sim = util.cos_sim(sent_emb, def_emb).item()
+                            alignment_score = max(0.0, sim)
+
+                            def_sent = CODEBOOK_SENTIMENTS.get(label, 0.0)
+                            if def_sent > 0.3 and sent_sentiment < -0.3:
+                                penalty += 0.4
+                            elif def_sent < -0.3 and sent_sentiment > 0.3:
+                                penalty += 0.4
+
+                            def_keys = CODEBOOK_KEYWORDS.get(label, set())
+                            if def_keys:
+                                overlap = def_keys.intersection(sent_keywords)
+                                if len(def_keys) >= 1 and len(overlap) == 0:
+                                    penalty += 0.15
+
+                            final_score = (model_prob * 0.6) + (alignment_score * 0.4) - penalty
+                            final_score = max(0.0, final_score)
+
+                        if has_alignment and alignment_score < 0.25:
+                            continue
+
+                        if final_score >= thr:
+                            tag_obj = {
+                                "label": label,
+                                "score": round(final_score, 3),
+                            }
+                            if has_alignment:
+                                tag_obj["explanation"] = {
+                                    "definition": definition,
+                                    "alignment_score": round(alignment_score, 3),
+                                    "sentiment_penalty": penalty
+                                }
+                            valid_tags.append(tag_obj)
+
+                valid_tags.sort(key=lambda x: x["score"], reverse=True)
+
+                final_filtered_tags = []
+                seen_prefixes = set()
+                for tag in valid_tags:
+                    label = tag["label"]
+                    if ":" in label:
+                        prefix = label.split(":")[0].strip()
+                        if prefix in seen_prefixes:
+                            continue
+                        seen_prefixes.add(prefix)
+                    final_filtered_tags.append(tag)
+                valid_tags = final_filtered_tags
+
+                item = {"sentence": sentence_case(sentence), "tags": valid_tags[:2]}
+                results.append(item)
+                emitted += 1
+                yield f"data: {json.dumps({'type': 'result', 'index': emitted, 'result': item}, ensure_ascii=False)}\n\n"
+
+        try:
+            if SUPABASE_KEY:
+                import requests
+                url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+                payload = []
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for item in results:
+                    payload.append({
+                        "sentence": item["sentence"],
+                        "tags": item["tags"],
+                        "raw_text": raw_text,
+                        "created_at": now_iso
+                    })
+                headers = {
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                }
+                requests.post(url, headers=headers, json=payload, timeout=10)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'warning', 'detail': f'Supabase write failed: {str(e)}'})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done', 'total': len(sentences)})}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)):
