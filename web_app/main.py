@@ -230,6 +230,52 @@ def _table_to_codebook(df: pd.DataFrame):
         raise HTTPException(status_code=400, detail="No valid (label, definition) rows found in codebook.")
     return out
 
+def _extract_docx_text(data: bytes) -> str:
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+    def extract_paragraphs(xml_bytes: bytes):
+        root = ET.fromstring(xml_bytes)
+        paras = []
+        for p in root.findall(".//w:p", ns):
+            texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
+            if texts:
+                paras.append("".join(texts).strip())
+        return [p for p in paras if p]
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except Exception:
+        return ""
+
+    with zf:
+        names = set(zf.namelist())
+        ordered = []
+        for n in ("word/document.xml",):
+            if n in names:
+                ordered.append(n)
+                names.remove(n)
+        for prefix in ("word/header", "word/footer"):
+            ordered.extend(sorted([n for n in names if n.startswith(prefix) and n.endswith(".xml")]))
+            for n in list(names):
+                if n.startswith(prefix) and n.endswith(".xml"):
+                    names.remove(n)
+        for n in ("word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"):
+            if n in names:
+                ordered.append(n)
+                names.remove(n)
+        ordered.extend(sorted([n for n in names if n.startswith("word/") and n.endswith(".xml")]))
+
+        parts = []
+        for n in ordered:
+            try:
+                parts.extend(extract_paragraphs(zf.read(n)))
+            except Exception:
+                continue
+        return "\n".join([p for p in parts if p]).strip()
+
 @app.post("/api/codebook")
 async def update_codebook(file: UploadFile = File(...)):
     global CODEBOOK, CODEBOOK_EMBEDDINGS
@@ -542,10 +588,7 @@ async def upload(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Invalid text file")
     elif ext == ".docx":
         try:
-            from docx import Document
-            doc = Document(io.BytesIO(data))
-            parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
-            text = "\n".join(parts)
+            text = _extract_docx_text(data)
         except Exception:
             raise HTTPException(status_code=400, detail="Failed to read DOCX")
     elif ext == ".pdf":
